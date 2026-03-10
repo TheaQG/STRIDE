@@ -1,0 +1,84 @@
+training:
+  run:
+    name: "train_edm_small"
+    output_dir: "runs/train_edm_small"
+    seed: 42
+
+  configs:
+    dataset_config: "configs/datasets/danra_era5_small.yaml"
+    model_config: "configs/models/edm_small.yaml"
+    generation_config: "configs/generation/edm_default.yaml"
+
+  data:
+    batch_size: 4
+    num_workers: 0
+    pin_memory: false
+    shuffle_train: true
+    drop_last_train: false
+    shuffle_val: false
+    drop_last_val: false
+
+  device:
+    accelerator: "auto"
+
+  loop:
+    max_epochs: 5
+    max_train_batches: null
+    max_val_batches: null
+    validate_every_n_epochs: 1
+
+  optimizer:
+    name: "adamw"
+    lr: 1.0e-4
+    weight_decay: 1.0e-4
+    betas: [0.9, 0.999]
+    eps: 1.0e-8
+
+  scheduler:
+    enabled: false
+    name: null
+    params: {}
+
+  ema:
+    enabled: true
+    decay: 0.999
+    update_after_step: 0
+    update_every: 1
+
+  checkpointing:
+    enabled: true
+    save_every_n_epochs: 10
+    save_best: true
+    resume_from: null
+
+  validation:
+    enabled: true
+    use_ema_model: true
+    run_sampling_preview: false
+
+  logging:
+    print_every_n_steps: 10
+    log_parameter_count: true
+    log_batch_shapes_once: true
+    print_step_progress: false
+    save_history_json: true
+  
+  generation_preview:
+    enabled: true
+    use_ema_model: true
+    every_n_epochs: 5
+    on_improved_val: true
+    min_epoch: 3
+    fixed_val_indices: [0]
+    save_arrays: true
+    save_plots: true
+    output_subdir: "generation_preview"
+
+  monitoring:
+    enabled: true
+    compute_every_n_epochs: 1
+    save_history_plots: true
+    output_subdir: "monitoring"
+    wet_threshold: 0.1
+    high_quantiles: [0.99, 0.999]
+    smoothing_alpha: 0.3
