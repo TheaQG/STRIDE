@@ -1,0 +1,39 @@
+generation:
+
+  checkpoint:
+    mode: "best"   # best | latest | explicit
+    path: null
+    use_ema_weights: true
+
+  data:
+    split: "test"
+    batch_size: 1
+    num_workers: 0
+    pin_memory: false
+    shuffle: false # We want to preserve the order of the test set for evaluation purposes
+
+  sampling:
+    ensemble_size: 3
+    use_fixed_seed: false
+    base_seed: 42
+
+  outputs:
+    save_members: true
+    save_pmm: true
+    save_ensemble_mean: true
+    save_plots: false
+    save_physical: true
+    output_format: "npz"
+    storage_mode: "per_member_bundle" # later: "ensemble_bundle", "per_case"
+
+  sampler:
+    num_steps: null      # null = use generation_config default
+    sigma_min: null
+    sigma_max: null
+    rho: null
+
+  limits:
+    max_cases: 3         # small smoke-test limit
+
+  device:
+    accelerator: "auto" # auto | cpu | cuda

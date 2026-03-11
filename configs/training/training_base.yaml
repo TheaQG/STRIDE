@@ -1,14 +1,4 @@
 training:
-  run:
-    name: "train_edm_small"
-    output_dir: "runs/train_edm_small"
-    seed: 42
-
-  configs:
-    dataset_config: "configs/datasets/danra_era5_small.yaml"
-    model_config: "configs/models/edm_small.yaml"
-    generation_config: "configs/generation/edm_default.yaml"
-
   data:
     batch_size: 4
     num_workers: 0
@@ -22,7 +12,7 @@ training:
     accelerator: "auto"
 
   loop:
-    max_epochs: 5
+    max_epochs: 2
     max_train_batches: null
     max_val_batches: null
     validate_every_n_epochs: 1
@@ -72,7 +62,7 @@ training:
     fixed_val_indices: [0]
     save_arrays: true
     save_plots: true
-    output_subdir: "generation_preview"
+    output_subdir: "training_generation_preview"
 
   monitoring:
     enabled: true

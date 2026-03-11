@@ -98,7 +98,7 @@ class TrainingPreviewConfig:
             fixed_val_indices=tuple(int(i) for i in fixed_val_indices_raw),
             save_arrays=bool(preview_cfg.get("save_arrays", True)),
             save_plots=bool(preview_cfg.get("save_plots", True)),
-            output_subdir=str(preview_cfg.get("output_subdir", "generation_preview")),
+            output_subdir=str(preview_cfg.get("output_subdir", "training_generation_preview")),
         )
 
 

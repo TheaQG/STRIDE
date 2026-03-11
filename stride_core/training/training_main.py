@@ -19,7 +19,7 @@ if str(REPO_ROOT) not in sys.path:
 from stride_core.training.trainer import Trainer
 
 
-DEFAULT_TRAINING_CONFIG = REPO_ROOT / "configs" / "training" / "train_edm_small.yaml"
+DEFAULT_TRAINING_CONFIG = REPO_ROOT / "configs" / "training" / "training_base.yaml"
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

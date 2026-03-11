@@ -1,0 +1,47 @@
+evaluation:
+  probabilistic:
+    crps: true
+    crps_decomposition: true
+    spread_skill: true
+    pit_histogram: true
+    rank_histogram: true
+    reliability_diagram: true
+  spatial:
+    psd: true
+    psd_slope: true
+    iss: true
+    sal: true
+  climatology:
+    pixel_value_distribution: true
+    histogram_comparison: true
+    qq_plot: true
+    extremes: true
+    wet_day_frequency: true
+    annual_precipitation_sum: true
+    seasonal_accumulations: true
+  temporal:
+    lag_autocorrelation: true
+    wet_spell_length: true
+    dry_spell_length: true
+
+thresholds:
+  reliability_thresholds_mm: [0.1, 1, 5, 10, 20]
+  iss_thresholds_mm: [1, 5, 10, 20, 50]
+  wet_day_threshold_mm: 1.0
+  spell_threshold_mm: 1.0
+  extreme_quantiles: [0.95, 0.99, 0.999, 0.9999]
+
+scales:
+  iss_scales_km: [5, 10, 20, 40]
+  psd_slope_fit_range_km: [10, 200]
+  autocorrelation_lags: [1, 3, 7, 14]
+
+masks:
+  apply_land_mask: true
+  apply_coastline_buffer: false
+  coastline_buffer_pixels: 0
+
+plotting:
+  enabled: true
+  families: {}
+  save_quicklooks: false

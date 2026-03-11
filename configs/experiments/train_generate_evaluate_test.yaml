@@ -1,0 +1,61 @@
+experiment:
+  name: train_generate_evaluate_test
+  output_root: runs/train_generate_evaluate_test
+  seed: 42
+
+stages:
+  training: true
+  generation: true
+  evaluation: true
+
+bases:
+  model: configs/models/edm_small.yaml
+  training: configs/training/training_base.yaml
+  generation: configs/generation/generation_base.yaml
+  evaluation: configs/evaluation/evaluation_base.yaml
+  data: configs/datasets/danra_era5_small.yaml
+
+data:
+  target:
+    variable: prcp
+    transform: log1p
+    output_shape: [128, 128]
+
+  conditioning:
+    dynamic_variables: [prcp, temp]
+    static_variables: [lsm, topography]
+    input_shape: [128, 128]
+
+  domain:
+    hr_size: [128, 128]
+    lr_size: [128, 128]
+    large_domain: false
+
+  split:
+    train: null
+    valid: null
+    test: null
+
+  overrides: {}
+
+training:
+  run_name: train_edm_small
+  overrides: {}
+
+
+generation:
+  run_name: generate_test_best
+  overrides:
+    generation_run:
+      data:
+        split: test
+
+evaluation:
+  run_name: evaluate_test_best
+  overrides:
+    evaluation_run:
+      data:
+        split: test
+        forecast_product_for_spatial: pmm
+        forecast_product_for_climatology: pmm
+        forecast_product_for_temporal: pmm
