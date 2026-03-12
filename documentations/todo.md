@@ -7,6 +7,13 @@ The goal is to stabilize the full training → generation → evaluation pipelin
 
 Immediate ToDo:
 - Change print()'s to logging calls in the pipeline
+- DOY output from dataset
+  - Step 1: Add DOY to dataset batch (adapter.py and features.py)
+  - Step 2: Thread DOY through training (trainer.py)
+  - Step 3: Thread DOY through generation (generator.py)
+  - Step 4: Implement actual embedding + FiLM in the model (edm_unet.py). Update based on old implementation
+  - Step 5: Expose config knobs in model config YAML and model construction plumbing ()
+- FiLM conditioning of DOY in the model
 ---
 
 # Phase A — Stabilize the full STRIDE pipeline
