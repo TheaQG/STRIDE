@@ -1,15 +1,21 @@
 """
-Split-aware statistics computation for the small DANRA/ERA5 STRIDE adapter.
+Split-aware statistics computation for the DANRA/ERA5 STRIDE adapter.
 
-This module computes variable-wise global statistics from the training split
-(or another selected split) using the already standardized STRIDE data path:
+This module computes variable-wise global statistics from a selected split using
+already standardized STRIDE data loading steps:
     - source-aware loading
     - orientation correction
+    - unit conversion
     - static consistency enforcement
     - optional crop selection
 
-For the first STRIDE setup, statistics are computed by pooling values across all
-selected dates for one variable and one domain.
+Statistics are computed by pooling values across all selected dates for one
+variable and one domain.
+
+The implementation is intentionally conservative: it still assumes the current
+ERA5 → DANRA experiment structure, but it now supports a broader conditioning
+variable set without requiring the statistics pipeline to be rewritten for each
+new variable.
 """
 
 from __future__ import annotations
@@ -58,6 +64,11 @@ SUPPORTED_VARIABLE_SPECS: dict[str, dict[str, Any]] = {
         "source": "DANRA",
         "transform_name": "log_zscore",
     },
+    "target_temp": {
+        "variable": "temp",
+        "source": "DANRA",
+        "transform_name": "zscore",
+    },
     "era5_prcp": {
         "variable": "prcp",
         "source": "ERA5",
@@ -65,6 +76,56 @@ SUPPORTED_VARIABLE_SPECS: dict[str, dict[str, Any]] = {
     },
     "era5_temp": {
         "variable": "temp",
+        "source": "ERA5",
+        "transform_name": "zscore",
+    },
+    "era5_cape": {
+        "variable": "cape",
+        "source": "ERA5",
+        "transform_name": "zscore",
+    },
+    "era5_msl": {
+        "variable": "msl",
+        "source": "ERA5",
+        "transform_name": "zscore",
+    },
+    "era5_ewvf": {
+        "variable": "ewvf",
+        "source": "ERA5",
+        "transform_name": "zscore",
+    },
+    "era5_nwvf": {
+        "variable": "nwvf",
+        "source": "ERA5",
+        "transform_name": "zscore",
+    },
+    "era5_pev": {
+        "variable": "pev",
+        "source": "ERA5",
+        "transform_name": "zscore",
+    },
+    "era5_z_pl_250": {
+        "variable": "z_pl_250",
+        "source": "ERA5",
+        "transform_name": "zscore",
+    },
+    "era5_z_pl_500": {
+        "variable": "z_pl_500",
+        "source": "ERA5",
+        "transform_name": "zscore",
+    },
+    "era5_z_pl_850": {
+        "variable": "z_pl_850",
+        "source": "ERA5",
+        "transform_name": "zscore",
+    },
+    "era5_z_pl_1000": {
+        "variable": "z_pl_1000",
+        "source": "ERA5",
+        "transform_name": "zscore",
+    },
+    "era5_theta_e_850": {
+        "variable": "theta_e_850",
         "source": "ERA5",
         "transform_name": "zscore",
     },
@@ -81,7 +142,6 @@ SUPPORTED_VARIABLE_SPECS: dict[str, dict[str, Any]] = {
 }
 
 
-
 def _build_crop_spec(crop: CropConfig | None) -> CropSpec | None:
     if crop is None:
         return None
@@ -92,6 +152,18 @@ def _build_crop_spec(crop: CropConfig | None) -> CropSpec | None:
         width=crop.width,
     )
 
+
+def _build_static_path_subset(variable_order: tuple[str, ...]) -> dict[str, str | Path]:
+    """
+    Build a subset of known static paths for the requested static variables.
+    """
+    missing = [name for name in variable_order if name not in STATIC_PATHS]
+    if missing:
+        raise ValueError(
+            "No static file path is registered for requested static variables: "
+            f"{missing}"
+        )
+    return {name: STATIC_PATHS[name] for name in variable_order}
 
 
 def _summarize_physical_values(values: np.ndarray, n_dates: int) -> StatsSummary:
@@ -151,7 +223,6 @@ def _compute_transform_stats(values: np.ndarray, transform_name: str) -> dict[st
     raise ValueError(f"Unsupported transform_name '{transform_name}'")
 
 
-
 def _load_variable_field_for_date(
     date_str: str,
     request: StatsRequest,
@@ -185,10 +256,7 @@ def _load_variable_field_for_date(
         source="ERA5",
     )
     cond_static = load_static_features(
-        static_paths={
-            "lsm": root_dir / "data_lsm" / "truth_fullDomain" / "lsm_full.npz",
-            "topo": root_dir / "data_topo" / "truth_fullDomain" / "topo_full.npz",
-        },
+        static_paths=_build_static_path_subset(request.static_variable_order),
         variable_order=list(request.static_variable_order),
         source="STATIC",
     )
@@ -242,7 +310,6 @@ def _load_variable_field_for_date(
     raise ValueError(
         f"Unsupported request combination: source='{request.source}', variable='{request.variable}'"
     )
-
 
 
 def compute_statistics_for_request(
@@ -321,7 +388,6 @@ def compute_statistics_for_request(
     )
 
 
-
 def build_default_stats_requests(
     split_manifest_path: str | Path,
     split_name: str,
@@ -329,7 +395,11 @@ def build_default_stats_requests(
     crop: CropConfig | None = None,
 ) -> list[StatsRequest]:
     """
-    Build a convenient first-pass set of statistics requests for the small setup.
+    Build a convenient default set of statistics requests for the current
+    DANRA/ERA5 setup.
+
+    The supported variables are defined in `SUPPORTED_VARIABLE_SPECS` and can be
+    expanded as the adapter grows.
     """
     requests: list[StatsRequest] = []
     for spec in SUPPORTED_VARIABLE_SPECS.values():

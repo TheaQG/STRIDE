@@ -19,7 +19,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, Iterable, TypedDict
 
-from stride_core.utils.variable_registry import get_source_file_prefix, validate_variables
+from data_adapters.danra_era5_small.variable_registry import get_source_file_prefix, validate_variables
 
 CANONICAL_SOURCES = {"DANRA", "ERA5"}
 DATE_LENGTH = 8

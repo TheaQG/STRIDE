@@ -1,20 +1,33 @@
 """
-Physical unit harmonization for the small DANRA/ERA5 STRIDE adapter.
+Physical unit harmonization for the DANRA/ERA5 STRIDE adapter.
 
 This module converts source-specific raw units into a common STRIDE physical-space
 convention before any transforms or statistics are applied.
 
-Current STRIDE conventions for the first experiment:
+Current STRIDE conventions used by the adapter:
     - prcp: mm day-1
     - temp: degC
+    - cape: J kg-1
+    - msl: Pa
+    - ewvf: kg m-1 s-1
+    - nwvf: kg m-1 s-1
+    - pev: source-native physical units (currently passed through)
+    - z_pl_250: source-native physical units (currently passed through)
+    - z_pl_500: source-native physical units (currently passed through)
+    - z_pl_850: source-native physical units (currently passed through)
+    - z_pl_1000: source-native physical units (currently passed through)
+    - theta_e_850: source-native physical units (currently passed through)
     - lsm: unitless
     - topo: m
 
 Current source assumptions inherited from the legacy pipeline:
     - DANRA prcp is already in mm day-1
-    - ERA5 prcp is in m day-1 and must be converted to mm day-1
-    - ERA5 temp is in K and must be converted to degC
-    - STATIC fields require no unit conversion
+    - ERA5 prcp is treated as m day-1 and converted to mm day-1
+    - ERA5 temp is in K and converted to degC
+    - DANRA temp is also converted from K to degC
+    - Most additional ERA5 conditioning variables are currently assumed to already
+      be in the desired physical units for training and are therefore passed through
+      unchanged unless a clear conversion rule is needed.
 
 The conversion step belongs in data loading, not in transforms.
 """
@@ -26,6 +39,23 @@ import numpy as np
 
 KELVIN_TO_CELSIUS_OFFSET = 273.15
 METERS_TO_MILLIMETERS = 1000.0
+
+
+NONNEGATIVE_VARIABLES = {"prcp", "cape"}
+PASS_THROUGH_VARIABLES = {
+    "cape",
+    "msl",
+    "ewvf",
+    "nwvf",
+    "pev",
+    "z_pl_250",
+    "z_pl_500",
+    "z_pl_850",
+    "z_pl_1000",
+    "theta_e_850",
+    "lsm",
+    "topo",
+}
 
 
 
@@ -42,7 +72,8 @@ def apply_unit_conversion(
     array
         Input 2D array in source-native units.
     variable
-        Canonical STRIDE variable name, e.g. `prcp`, `temp`, `lsm`, `topo`.
+        Canonical STRIDE variable name, e.g. `prcp`, `temp`, `cape`, `msl`,
+        `z_pl_500`, `theta_e_850`, `lsm`, `topo`.
     source
         Source identifier, e.g. `DANRA`, `ERA5`, `STATIC`.
 
@@ -79,10 +110,18 @@ def apply_unit_conversion(
             raise ValueError("STATIC source is not valid for variable 'temp'")
         return converted
 
-    # Static / already canonical variables
-    if variable in {"lsm", "topo"}:
+    # Additional conditioning variables currently passed through unchanged.
+    # This is intentional until a variable-specific conversion rule is needed.
+    if variable in PASS_THROUGH_VARIABLES:
+        if source == "STATIC" and variable not in {"lsm", "topo"}:
+            raise ValueError(
+                f"STATIC source is not valid for variable '{variable}'"
+            )
+        if variable in NONNEGATIVE_VARIABLES:
+            converted = np.clip(converted, 0.0, None)
         return converted
 
     raise ValueError(
-        f"No unit conversion rule defined for variable='{variable}', source='{source}'"
+        "No unit conversion rule defined for "
+        f"variable='{variable}', source='{source}'"
     )

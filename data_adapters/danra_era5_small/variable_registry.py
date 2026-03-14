@@ -4,14 +4,21 @@
     This module defines the canonical variable names used across the codebase and maps them to
     source-specific aliases, units, transforms, and plotting metadata.
 
-    Canonical names should be used everywhere in the codebase:
+    Canonical names should be used everywhere in the codebase, e.g.:
         - prcp
         - temp
+        - cape
+        - msl
+        - ewvf
+        - nwvf
+        - pev
+        - z_pl_250
+        - z_pl_500
+        - z_pl_850
+        - z_pl_1000
+        - theta_e_850
         - lsm
         - topo
-    
-        Anything dataset-specific (e.g. DANRA 'tp_tot', ERA5 'tp_589x789') should be resolved
-        through this registry, not hard-coded elsewhere.
 """
 
 
@@ -95,12 +102,12 @@ VARIABLE_REGISTRY: Dict[str, VariableSpec] = {
     "temp": VariableSpec(
         key="temp",
         long_name="2 m Temperature",
-        units="K",
+        units="degC",
         cmap="plasma",
         is_positive_definite=False,
         is_static=False,
         default_transform="zscore",
-        plot_range=(250.0, 320.0), # Kelvin
+        plot_range=(-20.0, 40.0),
         groups=("dynamic", "thermodynamic", "surface"),
         sources={
             # DANRA target files like: t2m_ave_19910813.npz
@@ -115,6 +122,196 @@ VARIABLE_REGISTRY: Dict[str, VariableSpec] = {
             "ERA5": SourceSpec(
                 dataset_name="ERA5",
                 file_prefix="temp_589x789",
+                npz_key="arr_0",
+                is_static=False,
+            ),
+        },
+    ),
+    "cape": VariableSpec(
+        key="cape",
+        long_name="Convective Available Potential Energy",
+        units="J kg-1",
+        cmap="viridis",
+        is_positive_definite=True,
+        is_static=False,
+        default_transform="zscore",
+        plot_range=(0.0, 2000.0),
+        groups=("dynamic", "thermodynamic", "instability"),
+        sources={
+            "ERA5": SourceSpec(
+                dataset_name="ERA5",
+                file_prefix="cape_589x789",
+                npz_key="arr_0",
+                is_static=False,
+            ),
+        },
+    ),
+    "msl": VariableSpec(
+        key="msl",
+        long_name="Mean Sea Level Pressure",
+        units="Pa",
+        cmap="cividis",
+        is_positive_definite=True,
+        is_static=False,
+        default_transform="zscore",
+        plot_range=(98000.0, 104000.0),
+        groups=("dynamic", "pressure", "surface"),
+        sources={
+            "ERA5": SourceSpec(
+                dataset_name="ERA5",
+                file_prefix="msl_589x789",
+                npz_key="arr_0",
+                is_static=False,
+            ),
+        },
+    ),
+    "ewvf": VariableSpec(
+        key="ewvf",
+        long_name="Eastward Water Vapour Flux",
+        units="kg m-1 s-1",
+        cmap="coolwarm",
+        is_positive_definite=False,
+        is_static=False,
+        default_transform="zscore",
+        plot_range=(-500.0, 500.0),
+        groups=("dynamic", "moisture", "transport"),
+        sources={
+            "ERA5": SourceSpec(
+                dataset_name="ERA5",
+                file_prefix="ewvf_589x789",
+                npz_key="arr_0",
+                is_static=False,
+            ),
+        },
+    ),
+    "nwvf": VariableSpec(
+        key="nwvf",
+        long_name="Northward Water Vapour Flux",
+        units="kg m-1 s-1",
+        cmap="coolwarm",
+        is_positive_definite=False,
+        is_static=False,
+        default_transform="zscore",
+        plot_range=(-500.0, 500.0),
+        groups=("dynamic", "moisture", "transport"),
+        sources={
+            "ERA5": SourceSpec(
+                dataset_name="ERA5",
+                file_prefix="nwvf_589x789",
+                npz_key="arr_0",
+                is_static=False,
+            ),
+        },
+    ),
+    "pev": VariableSpec(
+        key="pev",
+        long_name="Potential Evaporation",
+        units="source-native",
+        cmap="YlGnBu",
+        is_positive_definite=False,
+        is_static=False,
+        default_transform="zscore",
+        plot_range=(-10.0, 10.0),
+        groups=("dynamic", "surface", "hydrology"),
+        sources={
+            "ERA5": SourceSpec(
+                dataset_name="ERA5",
+                file_prefix="pev_589x789",
+                npz_key="arr_0",
+                is_static=False,
+            ),
+        },
+    ),
+    "z_pl_250": VariableSpec(
+        key="z_pl_250",
+        long_name="Geopotential at 250 hPa",
+        units="m2 s-2",
+        cmap="Spectral_r",
+        is_positive_definite=False,
+        is_static=False,
+        default_transform="zscore",
+        plot_range=(90000.0, 115000.0),
+        groups=("dynamic", "pressure_level", "geopotential"),
+        sources={
+            "ERA5": SourceSpec(
+                dataset_name="ERA5",
+                file_prefix="z_pl_250_589x789",
+                npz_key="arr_0",
+                is_static=False,
+            ),
+        },
+    ),
+    "z_pl_500": VariableSpec(
+        key="z_pl_500",
+        long_name="Geopotential at 500 hPa",
+        units="m2 s-2",
+        cmap="Spectral_r",
+        is_positive_definite=False,
+        is_static=False,
+        default_transform="zscore",
+        plot_range=(48000.0, 60000.0),
+        groups=("dynamic", "pressure_level", "geopotential"),
+        sources={
+            "ERA5": SourceSpec(
+                dataset_name="ERA5",
+                file_prefix="z_pl_500_589x789",
+                npz_key="arr_0",
+                is_static=False,
+            ),
+        },
+    ),
+    "z_pl_850": VariableSpec(
+        key="z_pl_850",
+        long_name="Geopotential at 850 hPa",
+        units="m2 s-2",
+        cmap="Spectral_r",
+        is_positive_definite=False,
+        is_static=False,
+        default_transform="zscore",
+        plot_range=(10000.0, 18000.0),
+        groups=("dynamic", "pressure_level", "geopotential"),
+        sources={
+            "ERA5": SourceSpec(
+                dataset_name="ERA5",
+                file_prefix="z_pl_850_589x789",
+                npz_key="arr_0",
+                is_static=False,
+            ),
+        },
+    ),
+    "z_pl_1000": VariableSpec(
+        key="z_pl_1000",
+        long_name="Geopotential at 1000 hPa",
+        units="m2 s-2",
+        cmap="Spectral_r",
+        is_positive_definite=False,
+        is_static=False,
+        default_transform="zscore",
+        plot_range=(0.0, 5000.0),
+        groups=("dynamic", "pressure_level", "geopotential"),
+        sources={
+            "ERA5": SourceSpec(
+                dataset_name="ERA5",
+                file_prefix="z_pl_1000_589x789",
+                npz_key="arr_0",
+                is_static=False,
+            ),
+        },
+    ),
+    "theta_e_850": VariableSpec(
+        key="theta_e_850",
+        long_name="Equivalent Potential Temperature at 850 hPa",
+        units="K",
+        cmap="magma",
+        is_positive_definite=False,
+        is_static=False,
+        default_transform="zscore",
+        plot_range=(250.0, 380.0),
+        groups=("dynamic", "pressure_level", "thermodynamic"),
+        sources={
+            "ERA5": SourceSpec(
+                dataset_name="ERA5",
+                file_prefix="theta_e_850_589x789",
                 npz_key="arr_0",
                 is_static=False,
             ),
@@ -294,8 +491,35 @@ def canonicalize_variable_name(name: str) -> str:
         "t2m": "temp",
         "t2m_ave": "temp",
         "t2m_589x789": "temp",
+        "cape": "cape",
+        "cape_589x789": "cape",
+        "msl": "msl",
+        "msl_589x789": "msl",
+        "ewvf": "ewvf",
+        "ewvf_589x789": "ewvf",
+        "nwvf": "nwvf",
+        "nwvf_589x789": "nwvf",
+        "pev": "pev",
+        "pev_589x789": "pev",
+        "z250": "z_pl_250",
+        "z500": "z_pl_500",
+        "z850": "z_pl_850",
+        "z1000": "z_pl_1000",
+        "z_pl_250": "z_pl_250",
+        "z_pl250": "z_pl_250",
+        "z_pl_500": "z_pl_500",
+        "z_pl500": "z_pl_500",
+        "z_pl_850": "z_pl_850",
+        "z_pl850": "z_pl_850",
+        "z_pl_1000": "z_pl_1000",
+        "z_pl1000": "z_pl_1000",
+        "theta_e_850": "theta_e_850",
+        "thetae_850": "theta_e_850",
+        "the_e_850": "theta_e_850",
         "lsm": "lsm",
         "topo": "topo",
+        "topography": "topo",
+        "orog": "topo",
     }
 
     if name not in alias_map:

@@ -2,36 +2,129 @@
 Feature-loading utilities for the small DANRA/ERA5 STRIDE adapter.
 
 Responsibilities:
+    - Load full-domain target and conditioning fields before any spatial crop
     - Stack requested dynamic variables in a deterministic order
-    - Load static variables
+    - Load requested static variables
     - Apply source-specific orientation corrections
     - Apply source-specific unit conversions
-    - Enforce static-field consistency between land-sea mask and topography
-    - Optionally add day-of-year/seasonality metadata later
+    - Optionally enforce simple consistency rules for selected static fields
+    - Build day-of-year sin/cos features from YYYYMMDD date strings
     - Keep source-specific file-key handling out of the rest of the adapter
 
 This module decides:
     - Channel order for cond_dynamic
     - Channel order for cond_static
     - Variable names stored in metadata
+
+This module does not decide:
+    - Fixed vs shuffled crop anchors
+    - Spatial region selection
+    - Per-sample crop metadata
+
+Those responsibilities belong to the adapter / region utilities.
 """
 
 from __future__ import annotations
 
+import math
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
 import numpy as np
 
 from data_adapters.danra_era5_small.unit_conversion import apply_unit_conversion
-from stride_core.utils.variable_registry import (
+from data_adapters.danra_era5_small.variable_registry import (
     get_source_flip_config,
     get_source_npz_key,
     validate_variables,
 )
 
 
+
 DEFAULT_FLOAT_DTYPE = np.float32
+
+
+def parse_yyyymmdd(date_str: str) -> datetime:
+    """
+    Parse a compact YYYYMMDD string into a datetime object.
+
+    Parameters
+    ----------
+    date_str
+        Date string in YYYYMMDD format.
+    """
+    if not isinstance(date_str, str):
+        raise TypeError(f"Expected date_str to be a string, got {type(date_str)}")
+
+    if len(date_str) != 8 or not date_str.isdigit():
+        raise ValueError(
+            f"Expected date string in YYYYMMDD format, got '{date_str}'"
+        )
+
+    return datetime.strptime(date_str, "%Y%m%d")
+
+
+def is_leap_year(year: int) -> bool:
+    """
+    Return True if `year` is a leap year in the Gregorian calendar.
+    """
+    return (year % 4 == 0 and year % 100 != 0) or (year % 400 == 0)
+
+
+def compute_day_of_year(date_str: str) -> int:
+    """
+    Compute the 1-indexed day-of-year from a YYYYMMDD string.
+
+    Returns
+    -------
+    int
+        Day of year in the interval [1, 365] or [1, 366] for leap years.
+    """
+    dt = parse_yyyymmdd(date_str)
+    return int(dt.timetuple().tm_yday)
+
+
+def build_doy_sincos(
+    date_str: str,
+    *,
+    use_leap_years: bool = False,
+    dtype: np.dtype = DEFAULT_FLOAT_DTYPE,  # type: ignore
+) -> np.ndarray:
+    """
+    Build a continuous day-of-year sin/cos encoding from a YYYYMMDD string.
+
+    Parameters
+    ----------
+    date_str
+        Date string in YYYYMMDD format.
+    use_leap_years
+        If True, use 366 days for leap years and 365 otherwise.
+        If False, fold Feb 29 onto Feb 28 so the embedding always uses a
+        fixed 365-day cycle.
+    dtype
+        Output floating dtype.
+
+    Returns
+    -------
+    np.ndarray
+        Array with shape [2] containing [sin(theta), cos(theta)].
+    """
+    dt = parse_yyyymmdd(date_str)
+    doy = compute_day_of_year(date_str)
+
+    if use_leap_years:
+        period = 366 if is_leap_year(dt.year) else 365
+    else:
+        # Fold Feb 29 onto Feb 28 to keep a stable 365-day cycle.
+        if is_leap_year(dt.year) and dt.month == 2 and dt.day == 29:
+            doy = 59
+        elif is_leap_year(dt.year) and doy > 60:
+            doy -= 1
+        period = 365
+
+    theta = 2.0 * math.pi * float(doy - 1) / float(period)
+    return np.asarray([math.sin(theta), math.cos(theta)], dtype=dtype)
 
 
 def apply_orientation(
@@ -68,7 +161,8 @@ def load_npz_array(
     file_path
         Path to the `.npz` file.
     variable
-        Canonical STRIDE variable name, e.g. `prcp`, `temp`, `lsm`, `topo`.
+        Canonical STRIDE variable name registered in the variable registry,
+        e.g. `prcp`, `temp`, `cape`, `msl`, `z_pl_500`, `lsm`, `topo`.
     source
         Source name used by the variable registry, e.g. `DANRA`, `ERA5`, `STATIC`.
     dtype
@@ -117,7 +211,11 @@ def load_target_field(
     dtype: np.dtype = DEFAULT_FLOAT_DTYPE, # type: ignore
 ) -> np.ndarray:
     """
-    Load one target field as a 2D array with shape `[H, W]`.
+    Load one full-domain target field as a 2D array with shape `[H, W]`.
+
+    Cropping is intentionally not performed here. Spatial region selection is
+    handled later by the adapter / region utilities so fixed crops and
+    train-time spatial shuffling use the same raw field loading path.
     """
     return load_npz_array(
         file_path=target_path,
@@ -134,14 +232,16 @@ def load_dynamic_conditioning(
     dtype: np.dtype = DEFAULT_FLOAT_DTYPE, # type: ignore
 ) -> np.ndarray:
     """
-    Load and stack dynamic conditioning variables in deterministic channel order.
+    Load and stack full-domain dynamic conditioning variables in deterministic
+    channel order.
 
     Parameters
     ----------
     dynamic_paths
         Mapping from canonical variable name to file path.
     variable_order
-        Ordered iterable specifying channel order, e.g. [`prcp`, `temp`].
+        Ordered iterable specifying channel order, e.g. [`prcp`, `temp`,
+        `cape`, `msl`, `z_pl_500`].
     source
         Source name used by the registry, typically `ERA5` for the first experiment.
     dtype
@@ -150,7 +250,12 @@ def load_dynamic_conditioning(
     Returns
     -------
     np.ndarray
-        Array with shape `[C_dyn, H, W]`.
+        Full-domain array with shape `[C_dyn, H, W]`.
+
+    Notes
+    -----
+    No cropping is performed here. Spatial cropping (fixed or shuffled) is
+    applied later in the adapter so all sample fields remain aligned.
     """
     ordered_variables = list(variable_order)
     validate_variables(ordered_variables)
@@ -186,28 +291,44 @@ def load_dynamic_conditioning(
     return np.stack(channels, axis=0)
 
 
+def _find_first_present(
+    candidates: Iterable[str],
+    variable_order: list[str],
+) -> int | None:
+    """
+    Return the index of the first candidate variable present in `variable_order`.
+
+    This keeps the consistency logic tolerant to small naming differences such as
+    `topo` vs `topography`.
+    """
+    for candidate in candidates:
+        if candidate in variable_order:
+            return variable_order.index(candidate)
+    return None
+
+
 def enforce_static_consistency(
     static_stack: np.ndarray,
     variable_order: list[str],
 ) -> np.ndarray:
     """
-    Enforce simple physical consistency rules between static fields.
+    Enforce simple physical consistency rules between selected static fields.
 
     Current rule:
-        - If both `lsm` and `topo` are present, set topography to exactly 0.0
-          wherever the land-sea mask indicates sea.
+        - If both a land-sea mask and a topography field are present, set
+          topography to exactly 0.0 wherever the mask indicates sea.
 
     Notes
     -----
-    This is intentionally simple for the first STRIDE setup. Because the current
-    LSM is binary, masking topography with the land mask is appropriate and also
-    removes small ocean artefacts / interpolation noise in the topo field.
+    This is intentionally conservative. The function should remain safe for
+    larger variable sets, so it only applies a correction when the relevant
+    fields are explicitly present.
     """
-    if "lsm" not in variable_order or "topo" not in variable_order:
-        return static_stack
+    lsm_idx = _find_first_present(["lsm", "land_sea_mask"], variable_order)
+    topo_idx = _find_first_present(["topo", "topography", "orog"], variable_order)
 
-    lsm_idx = variable_order.index("lsm")
-    topo_idx = variable_order.index("topo")
+    if lsm_idx is None or topo_idx is None:
+        return static_stack
 
     corrected = static_stack.copy()
     land_mask = corrected[lsm_idx] > 0.5
@@ -223,7 +344,7 @@ def load_static_features(
     dtype: np.dtype = DEFAULT_FLOAT_DTYPE, # type: ignore
 ) -> np.ndarray | None:
     """
-    Load and stack static variables in deterministic channel order.
+    Load and stack full-domain static variables in deterministic channel order.
 
     Parameters
     ----------
@@ -231,6 +352,8 @@ def load_static_features(
         Mapping from canonical static variable name to file path.
     variable_order
         Ordered iterable specifying static channel order, e.g. [`lsm`, `topo`].
+        The loader itself is generic and can support additional static fields as
+        long as they are registered and have discoverable file paths.
     source
         Source name used by the registry, typically `STATIC`.
     dtype
@@ -239,7 +362,13 @@ def load_static_features(
     Returns
     -------
     np.ndarray | None
-        Array with shape `[C_static, H, W]`, or None if no static variables are requested.
+        Full-domain array with shape `[C_static, H, W]`, or None if no static
+        variables are requested.
+
+    Notes
+    -----
+    No cropping is performed here. Spatial cropping (fixed or shuffled) is
+    applied later in the adapter so all sample fields remain aligned.
     """
     ordered_variables = list(variable_order)
     if not ordered_variables:
@@ -283,6 +412,7 @@ def load_static_features(
     return static_stack
 
 
+
 def build_feature_metadata(
     target_variable: str,
     dynamic_variables: Iterable[str],
@@ -303,4 +433,41 @@ def build_feature_metadata(
         "target_var": target_variable,
         "cond_dynamic_vars": dynamic_variables,
         "cond_static_vars": static_variables,
+    }
+
+
+def build_time_feature_metadata(
+    date_str: str,
+    *,
+    use_leap_years: bool = False,
+    dtype: np.dtype = DEFAULT_FLOAT_DTYPE,  # type: ignore
+) -> dict[str, int | list[float] | str]:
+    """
+    Build lightweight temporal metadata for one sample.
+
+    Parameters
+    ----------
+    date_str
+        Date string in YYYYMMDD format.
+    use_leap_years
+        Whether to preserve a 366-day cycle in leap years.
+    dtype
+        Floating dtype for the returned sin/cos features.
+
+    Returns
+    -------
+    dict
+        Metadata dictionary containing the original date string, the integer
+        day-of-year, and a JSON-friendly sin/cos encoding.
+    """
+    doy = compute_day_of_year(date_str)
+    doy_sincos = build_doy_sincos(
+        date_str,
+        use_leap_years=use_leap_years,
+        dtype=dtype,
+    )
+    return {
+        "date": date_str,
+        "day_of_year": doy,
+        "doy_sin_cos": [float(doy_sincos[0]), float(doy_sincos[1])],
     }

@@ -126,6 +126,20 @@ def main() -> None:
     print("\ntransform_metadata:")
     print(sample["meta"]["transform_metadata"])
 
+    print("\nDOY check:")
+    time_features = sample.get("time_features", None)
+    if time_features is None:
+        print("  time_features: None")
+    else:
+        tf = time_features.detach().cpu().numpy()
+        print(f"  time_features shape: {tuple(time_features.shape)}")
+        print(f"  time_features dtype: {time_features.dtype}")
+        print(f"  sin(DOY): {float(tf[0])}")
+        print(f"  cos(DOY): {float(tf[1])}")
+
+    print(f"  meta['day_of_year']: {sample['meta'].get('day_of_year', None)}")
+    print(f"  meta['doy_sin_cos']: {sample['meta'].get('doy_sin_cos', None)}")
+
     plot_adapter_sample(
         sample,
         title_prefix=(

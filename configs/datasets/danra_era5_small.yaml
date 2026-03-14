@@ -7,18 +7,6 @@ data:
     name: train
     stats_tag: random_seed42
 
-  target:
-    variable: prcp
-    source: DANRA
-
-  conditioning:
-    source: ERA5
-    variables: [prcp, temp]
-
-  statics:
-    source: STATIC
-    variables: [lsm, topo]
-
   domain:
     tag: dk_128x128
     crop:
@@ -27,13 +15,31 @@ data:
       height: 128
       width: 128
 
+    spatial_shuffle:
+      enabled: false
+      train_only: true
+      cutout_domain: [170, 350, 340, 520]   # [x1, x2, y1, y2]
+
+  target:
+    variable: prcp
+    source: DANRA
+
+  conditioning:
+    dynamic:
+      source: ERA5
+      variables: [prcp, temp] # , z500, ewvf, nwvf]
+    static:
+      source: STATIC
+      variables: [lsm, topo]
+
   transforms:
     apply: true
     target:
       prcp: log_zscore
     conditioning:
-      prcp: log_zscore
-      temp: zscore
-    statics:
-      lsm: identity
-      topo: zscore
+      dynamic:
+        prcp: log_zscore
+        temp: zscore
+      static:
+        lsm: identity
+        topo: zscore

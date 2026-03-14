@@ -9,7 +9,8 @@ across:
 - comparison scripts
 
 The goal is not to encode every possible plotting choice, but to provide a
-clean default mapping from variable names to sensible colormaps and labels.
+clean default mapping from canonical variable names to sensible colormaps,
+labels, and units.
 """
 
 from __future__ import annotations
@@ -153,42 +154,52 @@ _DEFAULT_SPECS: dict[str, VariablePlotSpec] = {
     "cape": VariablePlotSpec(
         cmap="viridis",
         label="CAPE",
-        unit=None,
+        unit="J kg⁻¹",
     ),
     "nwvf": VariablePlotSpec(
-        cmap="cividis",
+        cmap="coolwarm",
         label="Northward vapor flux",
-        unit=None,
+        unit="kg m⁻¹ s⁻¹",
     ),
     "ewvf": VariablePlotSpec(
-        cmap="magma",
+        cmap="coolwarm",
         label="Eastward vapor flux",
-        unit=None,
+        unit="kg m⁻¹ s⁻¹",
     ),
     "msl": VariablePlotSpec(
-        cmap="coolwarm",
+        cmap="cividis",
         label="Mean sea-level pressure",
+        unit="Pa",
+    ),
+    "pev": VariablePlotSpec(
+        cmap="YlGnBu",
+        label="Potential evaporation",
         unit=None,
     ),
     "z_pl_250": VariablePlotSpec(
-        cmap="coolwarm",
+        cmap="Spectral_r",
         label="Geopotential @ 250 hPa",
-        unit=None,
+        unit="m² s⁻²",
     ),
     "z_pl_500": VariablePlotSpec(
-        cmap="coolwarm",
+        cmap="Spectral_r",
         label="Geopotential @ 500 hPa",
-        unit=None,
+        unit="m² s⁻²",
     ),
     "z_pl_850": VariablePlotSpec(
-        cmap="coolwarm",
+        cmap="Spectral_r",
         label="Geopotential @ 850 hPa",
-        unit=None,
+        unit="m² s⁻²",
     ),
     "z_pl_1000": VariablePlotSpec(
-        cmap="coolwarm",
+        cmap="Spectral_r",
         label="Geopotential @ 1000 hPa",
-        unit=None,
+        unit="m² s⁻²",
+    ),
+    "theta_e_850": VariablePlotSpec(
+        cmap="magma",
+        label="Equivalent potential temperature @ 850 hPa",
+        unit="K",
     ),
 }
 
@@ -205,6 +216,17 @@ _ALIAS_MAP: dict[str, str] = {
     "rain": "prcp",
     "rainfall": "prcp",
     "orography": "topo",
+    "topography": "topo",
+    "z250": "z_pl_250",
+    "z500": "z_pl_500",
+    "z850": "z_pl_850",
+    "z1000": "z_pl_1000",
+    "z_pl250": "z_pl_250",
+    "z_pl500": "z_pl_500",
+    "z_pl850": "z_pl_850",
+    "z_pl1000": "z_pl_1000",
+    "thetae_850": "theta_e_850",
+    "the_e_850": "theta_e_850",
 }
 
 
