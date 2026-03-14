@@ -211,7 +211,8 @@ def stride_collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
 
     PyTorch's default_collate fails on nested metadata structures
     and optional None values. This collate keeps the structure
-    predictable while stacking tensor fields.
+    predictable while stacking tensor fields, including temporal
+    conditioning features such as DOY sin/cos.
     """
 
     if len(batch) == 0:
@@ -242,6 +243,23 @@ def stride_collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
 
     else:
         collated["cond_static"] = torch.stack([v for v in cond_static_values if v is not None], dim=0)
+
+    # Optional temporal conditioning features
+    time_feature_values = [sample.get("time_features") for sample in batch]
+
+    if all(v is None for v in time_feature_values):
+        collated["time_features"] = None
+
+    elif any(v is None for v in time_feature_values):
+        raise ValueError(
+            "Inconsistent batch: some samples contain time_features and others do not"
+        )
+
+    else:
+        collated["time_features"] = torch.stack(
+            [v for v in time_feature_values if v is not None],
+            dim=0,
+        )
 
     # ------------------------------------------------------------------
     # coordinate fields
@@ -377,7 +395,7 @@ def describe_batch(batch: dict[str, Any]) -> dict[str, Any]:
 
     summary: dict[str, Any] = {}
 
-    for key in ("target", "cond_dynamic", "cond_static"):
+    for key in ("target", "cond_dynamic", "cond_static", "time_features"):
 
         value = batch.get(key)
 
