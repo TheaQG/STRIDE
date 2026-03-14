@@ -411,9 +411,15 @@ Training uses an **Elucidated Diffusion Model (EDM)** for conditional generation
 Model inputs currently include:
 
 - `target` — high-resolution precipitation field
-- `cond_dynamic` — ERA5 atmospheric variables
-- `cond_static` — static fields (topography, land-sea mask)
+- `cond_dynamic` — configurable dynamic atmospheric predictors
+- `cond_static` — configurable static geographic fields
+- `time_features` — Day‑Of‑Year cyclic encoding (`sin(DOY)`, `cos(DOY)`)
 - `cond_coord` — spatial metadata
+
+Additional model conditioning mechanisms:
+
+- **Day‑Of‑Year FiLM conditioning** — seasonal context modulates intermediate model features
+- **RainGate auxiliary module** — predicts precipitation occurrence probability and provides an auxiliary training signal
 
 Training is controlled by:
 
@@ -532,6 +538,7 @@ Dataset sample structure:
     "target": tensor[C_out, H, W],
     "cond_dynamic": tensor[C_dyn, H, W],
     "cond_static": tensor[C_static, H, W] | None,
+    "time_features": tensor[2],
     "cond_coord": dict,
     "meta": dict
 }
@@ -590,39 +597,44 @@ Cropping is handled in `regions.py`.
 
 - DANRA precipitation
 
-### Dynamic conditions
+### Dynamic conditions (configurable)
+
+Examples currently available:
 
 - ERA5 precipitation
 - ERA5 temperature
+- CAPE
+- mean sea level pressure
+- geopotential height (multiple pressure levels)
+- water vapour flux
+- potential evaporation
 
-### Static conditions
+Dynamic variables are **selected per experiment via configuration**.
+
+### Static conditions (configurable)
 
 - land-sea mask
 - topography
 
 ---
 
+# Implemented Model Features
+
+The following conditioning and architectural features are currently implemented:
+
+- **Day‑Of‑Year encoding** provided by the data adapter
+- **FiLM‑based seasonal conditioning** inside the diffusion model
+- **RainGate auxiliary precipitation module**
+- **Configurable dynamic and static conditioning variables**
+
 # Planned Model Improvements
 
 Upcoming work:
 
-1. **Day-of-year conditioning (DOY)**
-2. **FiLM-based temporal modulation**
-3. **RainGate precipitation gating**
+1. **Spatial shuffling augmentation during training**
+2. **Evaluation plotting and metrics summary writer**
+3. **NorCP data adapter**
 4. **Larger context encoder**
-5. **Spatial shuffling augmentation**
-6. **New NorCP data adapter**
+5. **Support for non‑square model domains** (required for NorCP grids)
 
----
-
-# Design Principles
-
-STRIDE emphasizes:
-
-- config-driven experiments
-- modular pipelines
-- reproducibility
-- dataset adapters
-- clean experiment outputs
-
-The goal is to support **multiple climate downscaling experiments** while keeping infrastructure stable.
+Do not modify any other parts of the file.

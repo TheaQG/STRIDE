@@ -6,14 +6,12 @@ The goal is to stabilize the full training → generation → evaluation pipelin
 
 
 Immediate ToDo:
-- Change print()'s to logging calls in the pipeline
-- DOY output from dataset
-  - Step 1: Add DOY to dataset batch (adapter.py and features.py)
-  - Step 2: Thread DOY through training (trainer.py)
-  - Step 3: Thread DOY through generation (generator.py)
-  - Step 4: Implement actual embedding + FiLM in the model (edm_unet.py). Update based on old implementation
-  - Step 5: Expose config knobs in model config YAML and model construction plumbing ()
-- FiLM conditioning of DOY in the model
+
+- Change print() calls to proper logging throughout the pipeline
+- Implement spatial shuffling augmentation during training
+- Implement evaluation plotting and metrics summary writer
+- Begin implementation of NorCP data adapter
+
 ---
 
 # Phase A — Stabilize the full STRIDE pipeline
@@ -61,85 +59,25 @@ Once this phase is stable, the core pipeline architecture should not change sign
 
 # Phase B — Restore core modeling features
 
-Several modeling features were temporarily removed during the pipeline refactor and should now be re‑implemented.
+Several modeling features were implemented during the pipeline refactor. This phase documents what is already available and what remains to be added.
 
 Recommended order:
 
-## 1. Dates in dataset / dataloader
+## Implemented features
 
-Add explicit timestamp handling in datasets.
+The following model features are now implemented and stable:
 
-Goals:
+- Day‑Of‑Year extraction in the data adapter
+- DOY cyclic encoding (`sin(DOY)`, `cos(DOY)`)
+- FiLM‑based seasonal conditioning inside the diffusion model
+- Configurable conditioning variables per experiment
+- RainGate auxiliary precipitation module
 
-- return timestamps with each sample
-- allow temporal conditioning
-- allow correct metadata for generated samples
-- enable temporal evaluation metrics
-
-Dataset output should include:
-
-```
-{
-  "target",
-  "dynamic_conditions",
-  "static_conditions",
-  "timestamp"
-}
-```
+These components are now part of the core STRIDE architecture.
 
 ---
 
-## 2. Conditioning variable selection per experiment
-
-Experiments should be able to control which conditioning variables are used.
-
-Add configuration support in experiment configs such as:
-
-```
-data:
-  conditioning:
-    dynamic_variables:
-      - pr
-      - tas
-      - zg
-    static_variables:
-      - orog
-```
-
-This allows experiments to explore different conditioning setups without modifying adapters.
-
----
-
-## 3. FiLM conditioning of day‑of‑year (DOY)
-
-Once timestamps are available, implement DOY conditioning in the model.
-
-Approach:
-
-- compute DOY from timestamps
-- embed DOY
-- inject via FiLM modulation into the model
-
-Purpose:
-
-- capture seasonal precipitation patterns
-
----
-
-## 4. Larger context encoder
-
-Add a larger‑scale context encoder for LR inputs.
-
-Motivation:
-
-- capture larger spatial structures
-- improve downscaling realism
-
-This will likely modify the conditioning pathway of the model.
-
----
-
-## 5. Spatial shuffling augmentation
+## 1. Spatial shuffling augmentation
 
 Add spatial shuffling as a training augmentation.
 
@@ -152,20 +90,22 @@ Should be configurable via training config.
 
 ---
 
-## 6. RainGate
+## 2. Larger context encoder
 
-Implement RainGate for precipitation generation.
+Add a larger‑scale context encoder for LR inputs.
 
-Potential benefits:
+Motivation:
 
-- improved precipitation intermittency
-- better extreme precipitation modeling
+- capture larger spatial structures
+- improve downscaling realism
 
-Implementation will likely affect the output head and/or post‑processing.
+This will likely modify the conditioning pathway of the model.
 
 ---
 
 # Phase C — New dataset adapter: HCLIM NorCP
+
+This is now the primary dataset development target for STRIDE.
 
 Add a new data adapter for NorCP HCLIM data.
 
