@@ -1,5 +1,3 @@
-
-
 """
 Plain conditional UNet for STRIDE EDM models.
 
@@ -17,13 +15,14 @@ Current v1 scope
 - dynamic conditioning
 - optional static conditioning
 - optional FiLM-style auxiliary embedding (e.g. day-of-year later)
+- optional RainGate auxiliary wet/dry head with configurable input mode
 - encoder + decoder backbone
 
 Not included yet
 ----------------
 - context encoder
 - temporal stacking-specific logic
-- RainGate integration
+- RainGate feature modulation / output gating
 - EDM preconditioning math
 
 The goal is to get a clean, testable forward pass alive before adding the more
@@ -43,6 +42,7 @@ from stride_core.models.embeddings import (
     SigmaEmbedding,
 )
 from stride_core.models.encoder import Encoder
+from stride_core.models.rain_gate import RainGate
 
 
 class EDMUNet(nn.Module):
@@ -80,6 +80,8 @@ class EDMUNet(nn.Module):
         # Optional auxiliary FiLM embeddings.
         self.use_doy_film = spec.use_doy_film
         self.use_variable_film = spec.use_variable_film
+        self.use_rain_gate = spec.rain_gate_model.enabled
+        self.rain_gate_input_mode = spec.rain_gate_model.input_mode
 
         self.doy_embedding = (
             DayOfYearEmbedding(
@@ -99,6 +101,28 @@ class EDMUNet(nn.Module):
                 out_dim=spec.film_embed_dim,
             )
             if spec.use_variable_film
+            else None
+        )
+
+        if self.rain_gate_input_mode == "cond":
+            rain_gate_in_channels = spec.in_dynamic_channels + spec.in_static_channels
+        elif self.rain_gate_input_mode == "predcond":
+            rain_gate_in_channels = (
+                spec.out_channels + spec.in_dynamic_channels + spec.in_static_channels
+            )
+        else:
+            raise ValueError(
+                "Unsupported RainGate input_mode: "
+                f"{self.rain_gate_input_mode!r}"
+            )
+
+        self.rain_gate = (
+            RainGate(
+                in_channels=rain_gate_in_channels,
+                hidden_channels=spec.rain_gate_model.hidden_channels,
+                num_blocks=spec.rain_gate_model.num_blocks,
+            )
+            if self.use_rain_gate
             else None
         )
 
@@ -165,15 +189,15 @@ class EDMUNet(nn.Module):
         self,
         batch_size: int,
         x: torch.Tensor,
-        doy: torch.Tensor | None = None,
+        y: torch.Tensor | None = None,
         variable_labels: torch.Tensor | None = None,
     ) -> torch.Tensor | None:
         pieces: list[torch.Tensor] = []
 
         if self.doy_embedding is not None:
-            if doy is None:
-                raise ValueError("doy must be provided when use_doy_film=True")
-            pieces.append(self.doy_embedding(doy.to(device=x.device, dtype=x.dtype)))
+            if y is None:
+                raise ValueError("y must be provided when use_doy_film=True")
+            pieces.append(self.doy_embedding(y.to(device=x.device, dtype=x.dtype)))
 
         if self.variable_embedding is not None:
             if variable_labels is None:
@@ -199,6 +223,96 @@ class EDMUNet(nn.Module):
                 f"FiLM embedding batch size mismatch: expected {batch_size}, got {film_emb.shape[0]}"
             )
         return film_emb
+
+    def _build_rain_gate_input(
+        self,
+        x: torch.Tensor,
+        cond_dynamic: torch.Tensor,
+        cond_static: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """
+        Build the RainGate input tensor according to the configured input mode.
+
+        Supported modes
+        ---------------
+        - "cond": use conditioning channels only
+        - "predcond": use noisy prediction channels concatenated with
+          conditioning channels
+        """
+        if x.ndim != 4:
+            raise ValueError(
+                f"Expected x with shape [B, C, H, W] for RainGate, got {tuple(x.shape)}"
+            )
+        if x.shape[1] != self.out_channels:
+            raise ValueError(
+                "RainGate x channel mismatch: expected "
+                f"{self.out_channels}, got {x.shape[1]}"
+            )
+        if cond_dynamic.ndim != 4:
+            raise ValueError(
+                "Expected cond_dynamic with shape [B, C, H, W] for RainGate, got "
+                f"{tuple(cond_dynamic.shape)}"
+            )
+        if cond_dynamic.shape[1] != self.in_dynamic_channels:
+            raise ValueError(
+                "RainGate cond_dynamic channel mismatch: expected "
+                f"{self.in_dynamic_channels}, got {cond_dynamic.shape[1]}"
+            )
+
+        if x.shape[0] != cond_dynamic.shape[0]:
+            raise ValueError(
+                "Batch mismatch between x and cond_dynamic for RainGate: "
+                f"{x.shape[0]} vs {cond_dynamic.shape[0]}"
+            )
+        if x.shape[2:] != cond_dynamic.shape[2:]:
+            raise ValueError(
+                "Spatial mismatch between x and cond_dynamic for RainGate: "
+                f"{tuple(x.shape[2:])} vs {tuple(cond_dynamic.shape[2:])}"
+            )
+
+        if self.rain_gate_input_mode == "cond":
+            parts = [cond_dynamic]
+        elif self.rain_gate_input_mode == "predcond":
+            parts = [x, cond_dynamic]
+        else:
+            raise ValueError(
+                f"Unsupported RainGate input_mode: {self.rain_gate_input_mode!r}"
+            )
+
+        if self.in_static_channels > 0:
+            if cond_static is None:
+                raise ValueError(
+                    "cond_static must be provided for RainGate because "
+                    "spec.in_static_channels > 0"
+                )
+            if cond_static.ndim != 4:
+                raise ValueError(
+                    "Expected cond_static with shape [B, C, H, W] for RainGate, got "
+                    f"{tuple(cond_static.shape)}"
+                )
+            if cond_static.shape[0] != cond_dynamic.shape[0]:
+                raise ValueError(
+                    "Batch mismatch between cond_dynamic and cond_static for RainGate: "
+                    f"{cond_dynamic.shape[0]} vs {cond_static.shape[0]}"
+                )
+            if cond_static.shape[2:] != cond_dynamic.shape[2:]:
+                raise ValueError(
+                    "Spatial mismatch between cond_dynamic and cond_static for RainGate: "
+                    f"{tuple(cond_dynamic.shape[2:])} vs {tuple(cond_static.shape[2:])}"
+                )
+            if cond_static.shape[1] != self.in_static_channels:
+                raise ValueError(
+                    "RainGate cond_static channel mismatch: expected "
+                    f"{self.in_static_channels}, got {cond_static.shape[1]}"
+                )
+            parts.append(cond_static)
+        else:
+            if cond_static is not None:
+                raise ValueError(
+                    "cond_static was provided to RainGate but spec.in_static_channels == 0"
+                )
+
+        return torch.cat(parts, dim=1)
 
     def _assemble_input(
         self,
@@ -269,9 +383,10 @@ class EDMUNet(nn.Module):
         sigma: torch.Tensor,
         cond_dynamic: torch.Tensor,
         cond_static: torch.Tensor | None = None,
-        doy: torch.Tensor | None = None,
+        y: torch.Tensor | None = None,
         variable_labels: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+        return_aux: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """
         Forward pass of the plain conditional UNet.
 
@@ -285,16 +400,22 @@ class EDMUNet(nn.Module):
             Dynamic conditioning tensor with shape `[B, C_dyn, H, W]`.
         cond_static:
             Optional static conditioning tensor with shape `[B, C_static, H, W]`.
-        doy:
-            Optional day-of-year tensor used only when `use_doy_film=True`.
+        y:
+            Optional continuous temporal conditioning tensor used only when
+            `use_doy_film=True`. Expected shape is `[B, 2]` containing
+            `[sin(DOY), cos(DOY)]`.
         variable_labels:
             Optional categorical variable-label tensor used only when
             `use_variable_film=True`.
+        return_aux:
+            If True, return a tuple `(prediction, aux_dict)` where `aux_dict`
+            contains optional auxiliary outputs such as RainGate logits.
 
         Returns
         -------
-        torch.Tensor
+        torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]
             Predicted residual / denoised field with shape `[B, C_out, H, W]`.
+            If `return_aux=True`, also returns a dictionary of auxiliary outputs.
         """
         model_input = self._assemble_input(
             x=x,
@@ -306,9 +427,18 @@ class EDMUNet(nn.Module):
         film_emb = self._build_film_embedding(
             batch_size=x.shape[0],
             x=x,
-            doy=doy,
+            y=y,
             variable_labels=variable_labels,
         )
+
+        aux: dict[str, torch.Tensor] = {}
+        if self.rain_gate is not None:
+            rain_gate_input = self._build_rain_gate_input(
+                x=x,
+                cond_dynamic=cond_dynamic,
+                cond_static=cond_static,
+            )
+            aux["rain_gate_logits"] = self.rain_gate(rain_gate_input)
 
         bottleneck, skips = self.encoder(
             model_input,
@@ -321,4 +451,6 @@ class EDMUNet(nn.Module):
             emb=sigma_emb,
             film_emb=film_emb,
         )
+        if return_aux:
+            return out, aux
         return out

@@ -1,7 +1,7 @@
-
-
 from pathlib import Path
+import shutil
 import sys
+import tempfile
 
 # Allow direct execution via: python test_scripts/smoke_test_full_training.py
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -10,14 +10,16 @@ if str(REPO_ROOT) not in sys.path:
 
 import yaml
 
+from stride_core.pipeline.config_compiler import ConfigCompiler
+from stride_core.pipeline.experiment_config import ExperimentConfig
 from stride_core.training.trainer import Trainer
 
 
-
-TRAINING_CONFIG_PATH = REPO_ROOT / "configs" / "training" / "train_edm_small.yaml"
-SMOKE_ROOT = REPO_ROOT / "runs" / "smoke_tests" / "full_training"
-SMOKE_CONFIG_PATH = SMOKE_ROOT / "smoke_train_config.yaml"
-SMOKE_OUTPUT_DIR = SMOKE_ROOT / "run_output"
+EXPERIMENT_CONFIG_PATH = (
+    REPO_ROOT / "configs" / "experiments" / "train_generate_evaluate_test.yaml"
+)
+SMOKE_RUN_PARENT = REPO_ROOT / "runs" / "smoke_tests"
+SMOKE_EXPERIMENT_NAME = "smoke_test_full_training"
 
 
 def print_section(title: str) -> None:
@@ -26,99 +28,126 @@ def print_section(title: str) -> None:
     print("=" * len(title))
 
 
+def _abs_from_root(value: str | None) -> str | None:
+    if value is None:
+        return None
+    path = Path(value)
+    if not path.is_absolute():
+        path = (REPO_ROOT / path).resolve()
+    return str(path)
+
+
+def build_smoke_experiment_config(config_path: Path) -> Path:
+    if not config_path.exists():
+        raise FileNotFoundError(f"Experiment config does not exist: {config_path}")
+
+    with open(config_path, "r", encoding="utf-8") as f:
+        payload = yaml.safe_load(f)
+
+    if not isinstance(payload, dict):
+        raise ValueError(
+            f"Expected experiment config to load into a dict, got {type(payload)}"
+        )
+
+    experiment_cfg = payload.get("experiment")
+    stages_cfg = payload.get("stages")
+    bases_cfg = payload.get("bases")
+
+    if not isinstance(experiment_cfg, dict):
+        raise ValueError("Expected top-level 'experiment' section to be a dict")
+    if not isinstance(stages_cfg, dict):
+        raise ValueError("Expected top-level 'stages' section to be a dict")
+    if not isinstance(bases_cfg, dict):
+        raise ValueError("Expected top-level 'bases' section to be a dict")
+
+    experiment_cfg["name"] = SMOKE_EXPERIMENT_NAME
+    experiment_cfg["output_root"] = str(SMOKE_RUN_PARENT.resolve())
+
+    # Training-only smoke test.
+    stages_cfg["training"] = True
+    stages_cfg["generation"] = False
+    stages_cfg["evaluation"] = False
+
+    for key in ("model", "training", "generation", "evaluation", "data"):
+        if key in bases_cfg and bases_cfg.get(key) is not None:
+            bases_cfg[key] = _abs_from_root(bases_cfg.get(key))
+
+    training_cfg = payload.setdefault("training", {})
+    if not isinstance(training_cfg, dict):
+        raise ValueError("Expected top-level 'training' section to be a dict")
+    training_overrides = training_cfg.setdefault("overrides", {})
+    if not isinstance(training_overrides, dict):
+        raise ValueError("Expected 'training.overrides' to be a dict")
+
+    # Keep the smoke test tiny and deterministic.
+    training_overrides.update(
+        {
+            "training": {
+                "loop": {
+                    "max_epochs": 1,
+                    "max_train_batches": 2,
+                    "max_val_batches": 1,
+                    "validate_every_n_epochs": 1,
+                },
+                "checkpointing": {
+                    "enabled": True,
+                    "save_every_n_epochs": 1,
+                    "save_best": False,
+                    "resume_from": None,
+                },
+                "data": {
+                    "num_workers": 0,
+                },
+                "validation": {
+                    "enabled": True,
+                },
+            }
+        }
+    )
+
+    temp_dir = Path(tempfile.mkdtemp(prefix="stride_training_smoke_"))
+    temp_config_path = temp_dir / config_path.name
+    with open(temp_config_path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(payload, f, sort_keys=False)
+
+    return temp_config_path
+
 
 def main() -> None:
     print_section("STRIDE full trainer smoke test")
-    print(f"Base training config: {TRAINING_CONFIG_PATH}")
+    print(f"Experiment config: {EXPERIMENT_CONFIG_PATH}")
 
-    if not TRAINING_CONFIG_PATH.exists():
-        raise FileNotFoundError(f"Training config does not exist: {TRAINING_CONFIG_PATH}")
+    smoke_config_path = build_smoke_experiment_config(EXPERIMENT_CONFIG_PATH)
+    print_section("Smoke experiment config written")
+    print(f"Smoke config: {smoke_config_path}")
 
-    with open(TRAINING_CONFIG_PATH, "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
+    cfg = ExperimentConfig.from_yaml(smoke_config_path)
+    compiler = ConfigCompiler(cfg)
+    compiled = compiler.compile()
 
-    if not isinstance(cfg, dict):
-        raise ValueError(
-            f"Expected training config to load into a dict, got {type(cfg)}"
-        )
+    training_config_path = compiled.training_run_config_path
+    smoke_output_dir = compiled.experiment_root / "training"
 
-    training_cfg = cfg.get("training")
-    if not isinstance(training_cfg, dict):
-        raise ValueError("Expected top-level 'training' section to be a dict")
+    print_section("Compiled smoke training config")
+    print(f"Training config: {training_config_path}")
+    print(f"Smoke output dir: {smoke_output_dir}")
 
-    run_cfg = training_cfg.setdefault("run", {})
-    loop_cfg = training_cfg.setdefault("loop", {})
-    checkpoint_cfg = training_cfg.setdefault("checkpointing", {})
-    data_cfg = training_cfg.setdefault("data", {})
-    validation_cfg = training_cfg.setdefault("validation", {})
-
-    if not isinstance(run_cfg, dict):
-        raise ValueError("Expected 'training.run' to be a dict")
-    if not isinstance(loop_cfg, dict):
-        raise ValueError("Expected 'training.loop' to be a dict")
-    if not isinstance(checkpoint_cfg, dict):
-        raise ValueError("Expected 'training.checkpointing' to be a dict")
-    if not isinstance(data_cfg, dict):
-        raise ValueError("Expected 'training.data' to be a dict")
-    if not isinstance(validation_cfg, dict):
-        raise ValueError("Expected 'training.validation' to be a dict")
-
-    configs_cfg = training_cfg.setdefault("configs", {})
-    if not isinstance(configs_cfg, dict):
-        raise ValueError("Expected 'training.configs' to be a dict")
-
-    SMOKE_ROOT.mkdir(parents=True, exist_ok=True)
-
-    run_cfg["name"] = "smoke_test_full_training"
-    run_cfg["output_dir"] = str(SMOKE_OUTPUT_DIR)
-
-    # Make all referenced config paths absolute so the smoke-test config can live
-    # outside the normal configs/ tree without breaking path resolution.
-    dataset_config_raw = configs_cfg.get("dataset_config")
-    model_config_raw = configs_cfg.get("model_config")
-    generation_config_raw = configs_cfg.get("generation_config", None)
-
-    if dataset_config_raw is None:
-        raise KeyError("Missing required key 'training.configs.dataset_config'")
-    if model_config_raw is None:
-        raise KeyError("Missing required key 'training.configs.model_config'")
-
-    configs_cfg["dataset_config"] = str((REPO_ROOT / dataset_config_raw).resolve())
-    configs_cfg["model_config"] = str((REPO_ROOT / model_config_raw).resolve())
-    if generation_config_raw is not None:
-        configs_cfg["generation_config"] = str(
-            (REPO_ROOT / generation_config_raw).resolve()
-        )
-
-    loop_cfg["max_epochs"] = 1
-    loop_cfg["max_train_batches"] = 2
-    loop_cfg["max_val_batches"] = 1
-    loop_cfg["validate_every_n_epochs"] = 1
-
-    checkpoint_cfg["enabled"] = True
-    checkpoint_cfg["save_every_n_epochs"] = 1
-    checkpoint_cfg["save_best"] = False
-    checkpoint_cfg["resume_from"] = None
-
-    data_cfg["num_workers"] = 0
-    validation_cfg["enabled"] = True
-
-    with open(SMOKE_CONFIG_PATH, "w", encoding="utf-8") as f:
-        yaml.safe_dump(cfg, f, sort_keys=False)
-
-    print_section("Smoke-test config written")
-    print(f"Smoke config: {SMOKE_CONFIG_PATH}")
-    print(f"Smoke output dir: {SMOKE_OUTPUT_DIR}")
+    if smoke_output_dir.parent.exists():
+        # Ensure old artifacts do not make the smoke test pass accidentally.
+        shutil.rmtree(smoke_output_dir.parent)
+        compiled = compiler.compile()
+        training_config_path = compiled.training_run_config_path
+        smoke_output_dir = compiled.experiment_root / "training"
 
     print_section("Initializing trainer")
-    trainer = Trainer(SMOKE_CONFIG_PATH)
+    trainer = Trainer(training_config_path)
     print("Trainer initialized successfully.")
 
     print_section("Running fit()")
     trainer.fit()
     print("Trainer fit() completed successfully.")
 
-    checkpoint_dir = SMOKE_OUTPUT_DIR / "checkpoints"
+    checkpoint_dir = smoke_output_dir / "checkpoints"
     latest_checkpoint = checkpoint_dir / "checkpoint_latest.pt"
     epoch_checkpoint = checkpoint_dir / "checkpoint_epoch_0001.pt"
 

@@ -1,5 +1,3 @@
-
-
 """
 EDM-preconditioned UNet wrapper for STRIDE.
 
@@ -16,13 +14,14 @@ Current scope
 -------------
 - wraps the plain conditional UNet
 - supports dynamic + optional static conditioning
-- supports optional FiLM metadata passed through to the plain UNet
+- supports optional FiLM conditioning tensors passed through to the plain UNet
+- supports optional auxiliary outputs (e.g. RainGate logits)
 - returns a denoised prediction in the original target space
 
 Not included yet
 ----------------
 - context encoder integration
-- RainGate integration
+- RainGate feature modulation / output gating
 - temporal stacking-specific logic
 """
 
@@ -122,10 +121,16 @@ class EDMPrecondUNet(nn.Module):
         sigma: torch.Tensor,
         cond_dynamic: torch.Tensor,
         cond_static: torch.Tensor | None = None,
-        doy: torch.Tensor | None = None,
+        y: torch.Tensor | None = None,
         variable_labels: torch.Tensor | None = None,
         return_model_output: bool = False,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        return_aux: bool = False,
+    ) -> (
+        torch.Tensor
+        | tuple[torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, dict[str, torch.Tensor]]
+        | tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]
+    ):
         """
         Forward pass of the EDM-preconditioned model.
 
@@ -139,20 +144,33 @@ class EDMPrecondUNet(nn.Module):
             Dynamic conditioning tensor with shape `[B, C_dyn, H, W]`.
         cond_static:
             Optional static conditioning tensor with shape `[B, C_static, H, W]`.
-        doy:
-            Optional day-of-year tensor for future FiLM-style conditioning.
+        y:
+            Optional continuous temporal conditioning tensor for FiLM-style
+            conditioning. Expected shape is `[B, 2]` containing
+            `[sin(DOY), cos(DOY)]`.
         variable_labels:
             Optional categorical variable-label tensor for future FiLM-style
             conditioning.
         return_model_output:
             If True, also return the raw plain-UNet output before EDM output
             assembly. Useful for debugging.
+        return_aux:
+            If True, also return auxiliary outputs produced by the wrapped plain
+            UNet, e.g. RainGate logits.
 
         Returns
         -------
-        torch.Tensor or tuple[torch.Tensor, torch.Tensor]
-            By default returns the EDM denoised prediction. If
-            `return_model_output=True`, returns `(denoised, raw_model_output)`.
+        torch.Tensor or tuple
+            By default returns the EDM denoised prediction.
+
+            If `return_model_output=True`, returns:
+                `(denoised, raw_model_output)`
+
+            If `return_aux=True`, returns:
+                `(denoised, aux_dict)`
+
+            If both flags are True, returns:
+                `(denoised, raw_model_output, aux_dict)`
         """
         if x.ndim != 4:
             raise ValueError(f"Expected x with shape [B, C, H, W], got {tuple(x.shape)}")
@@ -165,17 +183,35 @@ class EDMPrecondUNet(nn.Module):
         c_skip, c_out, c_in, _ = self._preconditioning_coefficients(sigma_img)
 
         model_input = c_in * x
-        model_output = self.model(
-            x=model_input,
-            sigma=sigma_vec,
-            cond_dynamic=cond_dynamic,
-            cond_static=cond_static,
-            doy=doy,
-            variable_labels=variable_labels,
-        )
+        aux: dict[str, torch.Tensor] = {}
+
+        if return_aux:
+            model_output, aux = self.model(
+                x=model_input,
+                sigma=sigma_vec,
+                cond_dynamic=cond_dynamic,
+                cond_static=cond_static,
+                y=y,
+                variable_labels=variable_labels,
+                return_aux=True,
+            )
+        else:
+            model_output = self.model(
+                x=model_input,
+                sigma=sigma_vec,
+                cond_dynamic=cond_dynamic,
+                cond_static=cond_static,
+                y=y,
+                variable_labels=variable_labels,
+                return_aux=False,
+            )
 
         denoised = c_skip * x + c_out * model_output
 
+        if return_model_output and return_aux:
+            return denoised, model_output, aux
         if return_model_output:
             return denoised, model_output
+        if return_aux:
+            return denoised, aux
         return denoised

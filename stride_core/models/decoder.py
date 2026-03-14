@@ -80,7 +80,7 @@ class SkipFusion(nn.Module):
     """
     Fuse decoder features with an encoder skip tensor by channel concatenation.
 
-    An optional 1×1 projection is applied after concatenation to stabilize the
+    An optional 1x1 projection is applied after concatenation to stabilize the
     merged representation before residual processing.
     """
 

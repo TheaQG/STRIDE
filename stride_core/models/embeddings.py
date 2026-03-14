@@ -230,11 +230,20 @@ class SigmaEmbedding(nn.Module):
 
 class DayOfYearEmbedding(nn.Module):
     """
-    Cyclic day-of-year embedding using a deterministic sinusoidal encoding.
+    Embedding for precomputed cyclic day-of-year sin/cos features.
 
-    Input is expected to be day-of-year values in `[1, 365]` or `[0, 365]`.
-    The values are first mapped to the unit circle and then optionally projected
-    through a small MLP.
+    Input is expected to have shape `[B, 2]` and contain:
+
+        [sin(DOY), cos(DOY)]
+
+    where DOY has already been encoded upstream in the data adapter. This keeps
+    the model independent of filename parsing or calendar logic.
+
+    Notes
+    -----
+    The `period` argument is retained for backward compatibility but is no
+    longer used inside `forward`, since the cyclic encoding is already built
+    upstream.
     """
 
     def __init__(
@@ -269,20 +278,22 @@ class DayOfYearEmbedding(nn.Module):
                 )
 
     def forward(self, doy: torch.Tensor) -> torch.Tensor:
-        if doy.ndim == 0:
-            doy = doy[None]
-        if doy.ndim == 2 and doy.shape[-1] == 1:
-            doy = doy.squeeze(-1)
-        if doy.ndim != 1:
+        if doy.ndim != 2:
             raise ValueError(
-                f"Expected input with shape [B] or [B, 1], got {tuple(doy.shape)}"
+                f"Expected DOY sin/cos input with shape [B, 2], got {tuple(doy.shape)}"
+            )
+        if doy.shape[1] != 2:
+            raise ValueError(
+                f"Expected DOY sin/cos input with final dimension 2, got {tuple(doy.shape)}"
+            )
+        if not torch.is_floating_point(doy):
+            raise TypeError(
+                f"Expected DOY sin/cos input to be floating point, got {doy.dtype}"
             )
 
-        angle = 2.0 * math.pi * doy / self.period
-        cyc = torch.stack([torch.sin(angle), torch.cos(angle)], dim=-1)
         if self.proj is None:
-            return cyc
-        return self.proj(cyc)
+            return doy
+        return self.proj(doy)
 
 
 class CategoricalEmbedding(nn.Module):

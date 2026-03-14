@@ -15,6 +15,7 @@ Design principles
 - Keep stable reusable defaults in separate base configs.
 - Allow stage toggles.
 - Allow stage-specific overrides.
+- Allow model-specific overrides at the experiment level.
 - Make data a first-class part of experiment definition.
 - Keep the schema strict enough to catch mistakes early, but flexible enough
   that detailed knobs can be extended later.
@@ -131,6 +132,16 @@ class ExperimentBasesConfig:
 
 
 # -----------------------------------------------------------------------------
+# Model override config
+# -----------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ExperimentModelConfig:
+    overrides: dict[str, Any] = field(default_factory=dict)
+
+
+# -----------------------------------------------------------------------------
 # Data config
 # -----------------------------------------------------------------------------
 
@@ -205,6 +216,7 @@ class ExperimentConfig:
     meta: ExperimentMetaConfig
     stages: ExperimentStageToggleConfig
     bases: ExperimentBasesConfig
+    model: ExperimentModelConfig
     data: ExperimentDataConfig
     training: ExperimentTrainingConfig
     generation: ExperimentGenerationConfig
@@ -241,6 +253,7 @@ class ExperimentConfig:
         experiment_cfg = _require_dict(payload.get("experiment"), "experiment")
         stages_cfg = _require_dict(payload.get("stages"), "stages")
         bases_cfg = _require_dict(payload.get("bases"), "bases")
+        model_cfg = _require_dict(payload.get("model"), "model")
         data_cfg = _require_dict(payload.get("data"), "data")
         training_cfg = _require_dict(payload.get("training"), "training")
         generation_cfg = _require_dict(payload.get("generation"), "generation")
@@ -285,6 +298,12 @@ class ExperimentConfig:
         if evaluation_run_name is not None and not isinstance(evaluation_run_name, str):
             raise ValueError("evaluation.run_name must be a string or null")
 
+        model_overrides = (
+            _require_dict(model_cfg.get("overrides"), "model.overrides")
+            if "overrides" in model_cfg
+            else model_cfg
+        )
+
         return cls(
             meta=ExperimentMetaConfig(
                 name=experiment_name,
@@ -312,6 +331,9 @@ class ExperimentConfig:
                 data_config_path=_resolve_path(
                     bases_cfg.get("data"), config_path=config_path
                 ),
+            ),
+            model=ExperimentModelConfig(
+                overrides=model_overrides,
             ),
             data=ExperimentDataConfig(
                 target=ExperimentTargetConfig(

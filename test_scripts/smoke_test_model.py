@@ -1,5 +1,3 @@
-
-
 from pathlib import Path
 import sys
 
@@ -55,11 +53,18 @@ def build_fake_batch(spec: ModelSpec, batch_size: int = 2) -> dict:
             dtype=torch.float32,
         )
 
+    time_features = torch.randn(
+        batch_size,
+        2,
+        dtype=torch.float32,
+    )
+
     batch = {
         "target": target,
         "cond_dynamic": cond_dynamic,
         "cond_static": cond_static,
         "meta": {},
+        "time_features": time_features,
     }
     return batch
 
@@ -90,6 +95,7 @@ def main() -> None:
     print_tensor_info("cond_dynamic", batch["cond_dynamic"])
     if batch["cond_static"] is not None:
         print_tensor_info("cond_static", batch["cond_static"])
+    print_tensor_info("time_features", batch["time_features"])
 
     sigma = torch.exp(torch.randn(batch["target"].shape[0], dtype=batch["target"].dtype) * 1.2 - 1.2)
     print_tensor_info("sigma", sigma)
@@ -101,6 +107,7 @@ def main() -> None:
             sigma=sigma,
             cond_dynamic=batch["cond_dynamic"],
             cond_static=batch["cond_static"],
+            y=batch["time_features"],
         )
 
     print_tensor_info("prediction", pred)
@@ -111,6 +118,14 @@ def main() -> None:
             f"Prediction shape mismatch: expected {tuple(expected_shape)}, got {tuple(pred.shape)}"
         )
     print("Forward pass shape check passed.")
+    if getattr(spec, "use_doy_film", False):
+        print("DOY FiLM is enabled in the model spec.")
+        if batch["time_features"].shape != (batch["target"].shape[0], 2):
+            raise RuntimeError(
+                "time_features shape mismatch: expected "
+                f"({batch['target'].shape[0]}, 2), got {tuple(batch['time_features'].shape)}"
+            )
+        print("DOY conditioning shape check passed.")
 
     print("\nRunning EDM loss...")
     loss_fn = EDMLoss()

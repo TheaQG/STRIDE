@@ -1,10 +1,57 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+
+@dataclass(frozen=True)
+class RainGateModelSpec:
+    """
+    Architecture-facing RainGate configuration.
+    """
+
+    enabled: bool = False
+    hidden_channels: int = 32
+    num_blocks: int = 3
+    input_mode: str = "cond"
+
+    def _validate(self) -> None:
+        if self.hidden_channels <= 0:
+            raise ValueError("rain_gate.model.hidden_channels must be > 0")
+        if self.num_blocks <= 0:
+            raise ValueError("rain_gate.model.num_blocks must be > 0")
+        if self.input_mode not in {"cond", "predcond"}:
+            raise ValueError(
+                "rain_gate.model.input_mode must be one of {'cond', 'predcond'}"
+            )
+
+
+@dataclass(frozen=True)
+class RainGateLossSpec:
+    """
+    Loss-facing RainGate configuration.
+    """
+
+    enabled: bool = False
+    loss_weight: float = 0.1
+    wet_threshold_mm: float = 0.1
+    target_variable: str = "prcp"
+    use_loss_reweighting: bool = False
+    reweight_detach: bool = True
+    reweight_power: float = 1.0
+
+    def _validate(self) -> None:
+        if self.loss_weight < 0:
+            raise ValueError("rain_gate.loss.loss_weight must be >= 0")
+        if self.wet_threshold_mm < 0:
+            raise ValueError("rain_gate.loss.wet_threshold_mm must be >= 0")
+        if self.reweight_power < 0:
+            raise ValueError("rain_gate.loss.reweight_power must be >= 0")
+        if not self.target_variable:
+            raise ValueError("rain_gate.loss.target_variable must be non-empty")
 
 
 @dataclass(frozen=True)
@@ -49,8 +96,8 @@ class ModelSpec:
     context_embed_dim: int = 128
 
     # Rain gate
-    use_rain_gate: bool = False
-    rain_gate_channels: int = 32
+    rain_gate_model: RainGateModelSpec = field(default_factory=RainGateModelSpec)
+    rain_gate_loss: RainGateLossSpec = field(default_factory=RainGateLossSpec)
 
     # Future-facing switches
     use_temporal_stack: bool = False
@@ -89,6 +136,12 @@ class ModelSpec:
         embedding_cfg = model_cfg.get("embeddings", {})
         context_cfg = model_cfg.get("context", {})
         rain_gate_cfg = model_cfg.get("rain_gate", {})
+        if not isinstance(rain_gate_cfg, dict):
+            raise ValueError(
+                f"Expected 'model.rain_gate' to be a dict, got {type(rain_gate_cfg)}"
+            )
+        rain_gate_model_cfg = rain_gate_cfg.get("model", {})
+        rain_gate_loss_cfg = rain_gate_cfg.get("loss", {})
         temporal_cfg = model_cfg.get("temporal", {})
 
         for name, section in [
@@ -97,7 +150,8 @@ class ModelSpec:
             ("attention", attention_cfg),
             ("embeddings", embedding_cfg),
             ("context", context_cfg),
-            ("rain_gate", rain_gate_cfg),
+            ("rain_gate.model", rain_gate_model_cfg),
+            ("rain_gate.loss", rain_gate_loss_cfg),
             ("temporal", temporal_cfg),
         ]:
             if not isinstance(section, dict):
@@ -128,8 +182,27 @@ class ModelSpec:
             use_context_encoder=bool(context_cfg.get("use_context_encoder", False)),
             context_in_channels=int(context_cfg.get("context_in_channels", 0)),
             context_embed_dim=int(context_cfg.get("context_embed_dim", 128)),
-            use_rain_gate=bool(rain_gate_cfg.get("use_rain_gate", False)),
-            rain_gate_channels=int(rain_gate_cfg.get("rain_gate_channels", 32)),
+            rain_gate_model=RainGateModelSpec(
+                enabled=bool(rain_gate_model_cfg.get("enabled", False)),
+                hidden_channels=int(rain_gate_model_cfg.get("hidden_channels", 32)),
+                num_blocks=int(rain_gate_model_cfg.get("num_blocks", 3)),
+                input_mode=str(rain_gate_model_cfg.get("input_mode", "cond")),
+            ),
+            rain_gate_loss=RainGateLossSpec(
+                enabled=bool(rain_gate_loss_cfg.get("enabled", False)),
+                loss_weight=float(rain_gate_loss_cfg.get("loss_weight", 0.1)),
+                wet_threshold_mm=float(
+                    rain_gate_loss_cfg.get("wet_threshold_mm", 0.1)
+                ),
+                target_variable=str(
+                    rain_gate_loss_cfg.get("target_variable", "prcp")
+                ),
+                use_loss_reweighting=bool(
+                    rain_gate_loss_cfg.get("use_loss_reweighting", False)
+                ),
+                reweight_detach=bool(rain_gate_loss_cfg.get("reweight_detach", True)),
+                reweight_power=float(rain_gate_loss_cfg.get("reweight_power", 1.0)),
+            ),
             use_temporal_stack=bool(temporal_cfg.get("use_temporal_stack", False)),
             temporal_steps=int(temporal_cfg.get("temporal_steps", 1)),
         )
@@ -169,10 +242,21 @@ class ModelSpec:
                 "context_in_channels must be > 0 when use_context_encoder=True"
             )
 
+        self.rain_gate_model._validate()
+        self.rain_gate_loss._validate()
+
         if self.use_temporal_stack and self.temporal_steps <= 1:
             raise ValueError(
                 "temporal_steps must be > 1 when use_temporal_stack=True"
             )
+
+    @property
+    def use_rain_gate(self) -> bool:
+        return self.rain_gate_model.enabled
+
+    @property
+    def rain_gate_channels(self) -> int:
+        return self.rain_gate_model.hidden_channels
 
     @property
     def total_cond_channels(self) -> int:

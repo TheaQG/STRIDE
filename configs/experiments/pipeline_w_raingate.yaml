@@ -1,6 +1,6 @@
 experiment:
-  name: train_generate_evaluate_test
-  output_root: runs/train_generate_evaluate_test
+  name: pipeline_w_raingate
+  output_root: runs/pipeline_w_raingate
   seed: 42
 
 stages:
@@ -40,7 +40,23 @@ data:
 
 training:
   run_name: train_edm_small
-  overrides: {}
+  
+model:
+  overrides: 
+    rain_gate:
+      model:
+        enabled: true
+        hidden_channels: 32
+        num_blocks: 3
+        input_mode: "cond"
+      loss:
+        enabled: false
+        loss_weight: 0.1
+        wet_threshold_mm: 0.1
+        target_variable: "prcp"
+        use_loss_reweighting: false
+        reweight_detach: true
+        reweight_power: 1.0
 
 
 generation:

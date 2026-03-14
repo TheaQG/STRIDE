@@ -92,7 +92,6 @@ class ConfigCompiler:
         # Compile reusable resolved base configs
         # ------------------------------------------------------------------
 
-        resolved_model = copy.deepcopy(base_model) if base_model is not None else None
         resolved_training_base = (
             copy.deepcopy(base_training) if base_training is not None else {}
         )
@@ -105,6 +104,10 @@ class ConfigCompiler:
         resolved_data = self._compile_data_config(
             base_data,
             base_data_config_path=self.cfg.bases.data_config_path,
+        )
+        resolved_model = self._compile_model_config(
+            base_model,
+            resolved_data=resolved_data,
         )
 
         model_config_path = self._write_yaml_if_not_none(
@@ -220,6 +223,75 @@ class ConfigCompiler:
             evaluation_run_config_path=evaluation_run_config_path,
             manifest_path=manifest_path,
         )
+    def _compile_model_config(
+        self,
+        base_model: dict[str, Any] | None,
+        *,
+        resolved_data: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """
+        Compile a resolved model config.
+
+        The resolved model config is built by:
+        1) copying the base model config,
+        2) applying experiment-level model overrides inside the top-level
+           `model` section,
+        3) overwriting derived channel counts from the resolved data config.
+
+        This keeps experiment-driven model ablations possible while ensuring
+        data-dependent channel counts remain the source of truth.
+        """
+        if base_model is None:
+            return None
+
+        resolved = copy.deepcopy(base_model)
+
+        # Apply experiment-level model overrides inside the top-level `model`
+        # section, then overwrite derived channel counts from resolved data
+        # below.
+        resolved.setdefault("model", {})
+        self._deep_update(
+            resolved["model"],
+            copy.deepcopy(self.cfg.model.overrides),
+        )
+
+        dynamic_variables = self._nested_get(
+            resolved_data,
+            ["data", "conditioning", "dynamic", "variables"],
+            default=self._nested_get(resolved_data, ["dynamic_variables"], default=[]),
+        )
+        static_variables = self._nested_get(
+            resolved_data,
+            ["data", "conditioning", "static", "variables"],
+            default=self._nested_get(resolved_data, ["static_variables"], default=[]),
+        )
+        target_variable = self._nested_get(
+            resolved_data,
+            ["data", "target", "variable"],
+            default=self._nested_get(resolved_data, ["target_variable"], default=None),
+        )
+
+        dynamic_count = len(dynamic_variables) if isinstance(dynamic_variables, list) else 0
+        static_count = len(static_variables) if isinstance(static_variables, list) else 0
+        target_count = 1 if target_variable is not None else 1
+
+        self._set_if_not_none(
+            resolved,
+            ["model", "in_dynamic_channels"],
+            dynamic_count,
+        )
+        self._set_if_not_none(
+            resolved,
+            ["model", "in_static_channels"],
+            static_count,
+        )
+        self._set_if_not_none(
+            resolved,
+            ["model", "out_channels"],
+            target_count,
+        )
+
+        return resolved
 
     # ------------------------------------------------------------------
     # Data compilation
@@ -239,6 +311,10 @@ class ConfigCompiler:
         - inject experiment-level data metadata in a structured way,
         - and apply explicit data overrides last.
 
+        `data.overrides` are interpreted relative to the adapter-facing top-level
+        `data:` block. For backward compatibility, a legacy override payload that
+        already includes a top-level `data` key is also accepted.
+
         The exact adapter-specific field mapping can be expanded later.
         """
         resolved = copy.deepcopy(base_data) if base_data is not None else {}
@@ -255,8 +331,12 @@ class ConfigCompiler:
                 "output_shape": self.cfg.data.target.output_shape,
             },
             "conditioning": {
-                "dynamic_variables": self.cfg.data.conditioning.dynamic_variables,
-                "static_variables": self.cfg.data.conditioning.static_variables,
+                "dynamic": {
+                    "variables": self.cfg.data.conditioning.dynamic_variables,
+                },
+                "static": {
+                    "variables": self.cfg.data.conditioning.static_variables,
+                },
                 "input_shape": self.cfg.data.conditioning.input_shape,
             },
             "domain": {
@@ -274,8 +354,26 @@ class ConfigCompiler:
         # Always keep an explicit experiment-owned data block.
         resolved["experiment_data"] = experiment_data_block
 
-        # Best-effort mapping onto common direct fields. This keeps the compiler
-        # useful immediately, while still allowing later refinement.
+        # Write the experiment selections directly into the adapter-facing
+        # nested data config structure.
+        self._set_if_not_none(
+            resolved,
+            ["data", "target", "variable"],
+            self.cfg.data.target.variable,
+        )
+        self._set_if_not_none(
+            resolved,
+            ["data", "conditioning", "dynamic", "variables"],
+            self.cfg.data.conditioning.dynamic_variables,
+        )
+        self._set_if_not_none(
+            resolved,
+            ["data", "conditioning", "static", "variables"],
+            self.cfg.data.conditioning.static_variables,
+        )
+
+        # Keep a few generic convenience fields for downstream consumers that
+        # may still read them directly.
         self._set_if_not_none(resolved, ["target_variable"], self.cfg.data.target.variable)
         self._set_if_not_none(resolved, ["target_transform"], self.cfg.data.target.transform)
         self._set_if_not_none(
@@ -306,7 +404,21 @@ class ConfigCompiler:
             self.cfg.data.target.output_shape,
         )
 
-        self._deep_update(resolved, copy.deepcopy(self.cfg.data.overrides))
+        data_overrides = copy.deepcopy(self.cfg.data.overrides)
+        if isinstance(data_overrides, dict) and len(data_overrides) > 0:
+            resolved.setdefault("data", {})
+            if (
+                "data" in data_overrides
+                and isinstance(data_overrides["data"], dict)
+                and len(data_overrides) == 1
+            ):
+                # Backward-compatible legacy form:
+                # data.overrides = {"data": {...}}
+                self._deep_update(resolved["data"], data_overrides["data"])
+            else:
+                # Preferred form:
+                # data.overrides = {...}  (interpreted relative to top-level data:)
+                self._deep_update(resolved["data"], data_overrides)
         return resolved
     def _resolve_relative_paths_inplace(
         self,
@@ -363,7 +475,15 @@ class ConfigCompiler:
         if "training" not in config or not isinstance(config["training"], dict):
             raise KeyError("Expected training base config to contain a top-level 'training' section")
 
-        self._deep_update(config, copy.deepcopy(self.cfg.training.overrides))
+        training_overrides = copy.deepcopy(self.cfg.training.overrides)
+
+        # Legacy guard: model overrides belong in the top-level experiment
+        # `model` section and are compiled into `model_resolved.yaml`. Do not
+        # also inject them into the training run config, where they would be
+        # misleading because Trainer builds from `configs.model_config`.
+        training_overrides.pop("model", None)
+
+        self._deep_update(config, training_overrides)
 
         training_cfg = config["training"]
         training_cfg.setdefault("run", {})

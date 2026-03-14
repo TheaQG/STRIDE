@@ -1,5 +1,3 @@
-
-
 """
 EDM sampler for STRIDE.
 
@@ -13,11 +11,11 @@ Current scope
 - optional churn / stochasticity injection
 - Euler + Heun correction updates
 - dynamic + optional static conditioning
-- optional FiLM metadata passthrough (`doy`, `variable_labels`)
+- optional FiLM conditioning passthrough (`y`, `variable_labels`)
 
 The sampler expects a model with a forward signature like:
 
-    model(x, sigma, cond_dynamic, cond_static=None, doy=None, variable_labels=None)
+    model(x, sigma, cond_dynamic, cond_static=None, y=None, variable_labels=None)
 
 which matches the current `EDMPrecondUNet` wrapper.
 """
@@ -86,7 +84,7 @@ def edm_sampler(
     S_min: float = 0.0,
     S_max: float = float("inf"),
     S_noise: float = 1.0,
-    doy: torch.Tensor | None = None,
+    y: torch.Tensor | None = None,
     variable_labels: torch.Tensor | None = None,
     return_intermediates: bool = False,
 ) -> torch.Tensor | dict[str, Any]:
@@ -107,8 +105,9 @@ def edm_sampler(
         Karras schedule parameters.
     S_churn, S_min, S_max, S_noise:
         EDM stochasticity / churn parameters.
-    doy:
-        Optional day-of-year tensor passed through to the model.
+    y:
+        Optional continuous temporal conditioning tensor passed through to the
+        model. Expected shape is `[B, 2]` containing `[sin(DOY), cos(DOY)]`.
     variable_labels:
         Optional variable label tensor passed through to the model.
     return_intermediates:
@@ -138,6 +137,20 @@ def edm_sampler(
             raise ValueError(
                 "Spatial mismatch between cond_dynamic and cond_static: "
                 f"{tuple(cond_dynamic.shape[2:])} vs {tuple(cond_static.shape[2:])}"
+            )
+
+    if y is not None:
+        if y.ndim != 2:
+            raise ValueError(
+                f"Expected y with shape [B, 2], got {tuple(y.shape)}"
+            )
+        if y.shape[0] != cond_dynamic.shape[0]:
+            raise ValueError(
+                f"Batch mismatch between cond_dynamic and y: {cond_dynamic.shape[0]} vs {y.shape[0]}"
+            )
+        if y.shape[1] != 2:
+            raise ValueError(
+                f"Expected y to have final dimension 2 for [sin(DOY), cos(DOY)], got {tuple(y.shape)}"
             )
 
     if num_steps <= 0:
@@ -206,7 +219,7 @@ def edm_sampler(
             sigma=sigma_hat_vec,
             cond_dynamic=cond_dynamic,
             cond_static=cond_static,
-            doy=doy,
+            y=y,
             variable_labels=variable_labels,
         )
 
@@ -230,7 +243,7 @@ def edm_sampler(
             sigma=sigma_next_vec,
             cond_dynamic=cond_dynamic,
             cond_static=cond_static,
-            doy=doy,
+            y=y,
             variable_labels=variable_labels,
         )
         d_next = (x_euler - denoised_next) / sigma_next

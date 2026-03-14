@@ -5,7 +5,7 @@ This module provides the first clean training loop for STRIDE. It keeps the
 useful structure from the legacy training setup - config-driven orchestration,
 EMA support, checkpointing, validation, and resume support - while dropping the
 legacy clutter tied to old dataset contracts, old generative paradigms,
-classifier-free guidance, RainGate-specific logic, and other project-specific
+classifier-free guidance, legacy project-specific branches, and other
 branches that do not belong in STRIDE v1.
 
 Responsibilities
@@ -16,7 +16,7 @@ Responsibilities
 - run training and validation epochs
 - checkpoint periodically
 - optionally resume from checkpoint
-- print simple training progress summaries
+- log training progress summaries
 
 Non-responsibilities
 --------------------
@@ -60,6 +60,9 @@ from stride_core.training.training_logging import (
     TrainingHistory,
     format_epoch_summary,
     format_step_progress,
+    log_epoch_summary,
+    log_run_setup,
+    log_step_progress,
     print_section,
     summarize_run_setup,
 )
@@ -246,7 +249,17 @@ class Trainer:
 
         self.model_spec = ModelSpec.from_yaml(self.cfg.model_config_path)
         self.model = build_model(self.model_spec).to(self.device)
-        self.loss_fn = EDMLoss()
+        self.loss_fn = EDMLoss(
+            rain_gate_cfg={
+                "enabled": self.model_spec.rain_gate_loss.enabled,
+                "loss_weight": self.model_spec.rain_gate_loss.loss_weight,
+                "wet_threshold_mm": self.model_spec.rain_gate_loss.wet_threshold_mm,
+                "target_variable": self.model_spec.rain_gate_loss.target_variable,
+                "use_loss_reweighting": self.model_spec.rain_gate_loss.use_loss_reweighting,
+                "reweight_detach": self.model_spec.rain_gate_loss.reweight_detach,
+                "reweight_power": self.model_spec.rain_gate_loss.reweight_power,
+            }
+        )
 
         self.optimizer_config = OptimizerConfig.from_training_yaml(
             self.cfg.training_config_path
@@ -516,10 +529,14 @@ class Trainer:
         self.global_step = loaded.global_step
         self.best_val_loss = loaded.best_val_loss
 
-        print(f"Resumed checkpoint: {loaded.checkpoint_path}")
-        print(f"Resumed epoch:      {loaded.epoch}")
-        print(f"Resumed global_step:{loaded.global_step}")
-        print(f"Resumed best_val:   {loaded.best_val_loss}")
+        log_run_setup(
+            [
+                f"Resumed checkpoint: {loaded.checkpoint_path}",
+                f"Resumed epoch:      {loaded.epoch}",
+                f"Resumed global_step:{loaded.global_step}",
+                f"Resumed best_val:   {loaded.best_val_loss}",
+            ]
+        )
 
     def _checkpoint_if_needed(
         self,
@@ -559,7 +576,7 @@ class Trainer:
             save_latest=False,
         )
         for label, path in latest_paths.items():
-            print(f"Saved checkpoint [latest/{label}]: {path}")
+            log_run_setup([f"Saved checkpoint [latest/{label}]: {path}"])
 
         # Save periodic epoch snapshots only when the configured interval is reached.
         should_save_periodic = (
@@ -574,7 +591,7 @@ class Trainer:
                 save_latest=False,
             )
             for label, path in periodic_paths.items():
-                print(f"Saved checkpoint [periodic/{label}]: {path}")
+                log_run_setup([f"Saved checkpoint [periodic/{label}]: {path}"])
 
         # Save a dedicated best checkpoint only when validation improved.
         if self.checkpoint_config.save_best and improved_val:
@@ -585,7 +602,7 @@ class Trainer:
                 save_latest=False,
             )
             for label, path in best_paths.items():
-                print(f"Saved checkpoint [best/{label}]: {path}")
+                log_run_setup([f"Saved checkpoint [best/{label}]: {path}"])
 
     # ------------------------------------------------------------------
     # scheduler handling
@@ -630,7 +647,7 @@ class Trainer:
             trainable_params if self.cfg.log_parameter_count else 0
         )
 
-        for line in summarize_run_setup(
+        setup_lines = summarize_run_setup(
             run_name=self.cfg.run_name,
             device=str(self.device),
             output_dir=self.cfg.output_dir,
@@ -643,10 +660,24 @@ class Trainer:
             total_params=total_params_to_show,
             trainable_params=trainable_params_to_show,
             ema_enabled=self.ema is not None,
-        ):
-            print(line)
-        print(f"Generation preview: {self.preview_config.enabled}")
-        print(f"Monitoring:         {self.monitoring_config.enabled}")
+        )
+        setup_lines.extend(
+            [
+                f"Generation preview: {self.preview_config.enabled}",
+                f"Monitoring:         {self.monitoring_config.enabled}",
+                f"RainGate model:     {self.model_spec.rain_gate_model.enabled}",
+                f"RainGate loss:      {self.model_spec.rain_gate_loss.enabled}",
+            ]
+        )
+        if self.model_spec.rain_gate_loss.enabled:
+            setup_lines.extend(
+                [
+                    f"RainGate weight:    {self.model_spec.rain_gate_loss.loss_weight}",
+                    "RainGate wet thr.: "
+                    f"{self.model_spec.rain_gate_loss.wet_threshold_mm} mm",
+                ]
+            )
+        log_run_setup(setup_lines)
 
     def _print_epoch_summary(
         self,
@@ -662,7 +693,7 @@ class Trainer:
         if stage == "valid":
             best_val_loss = self.best_val_loss
 
-        print(
+        log_epoch_summary(
             format_epoch_summary(
                 stage,
                 epoch,
@@ -683,7 +714,7 @@ class Trainer:
         loss_value: float,
         global_step: int | None = None,
     ) -> None:
-        print(
+        log_step_progress(
             format_step_progress(
                 stage,
                 epoch=epoch,
@@ -703,14 +734,16 @@ class Trainer:
 
     def _print_batch_overview(self, batch: dict[str, Any]) -> None:
         print_section("First training batch overview")
-        for key in ("target", "cond_dynamic", "cond_static"):
+        for key in ("target", "cond_dynamic", "cond_static", "time_features"):
             value = batch.get(key)
             if isinstance(value, torch.Tensor):
-                print(
-                    f"{key}: shape={tuple(value.shape)} dtype={value.dtype} device={value.device}"
+                log_run_setup(
+                    [
+                        f"{key}: shape={tuple(value.shape)} dtype={value.dtype} device={value.device}"
+                    ]
                 )
             else:
-                print(f"{key}: type={type(value).__name__}")
+                log_run_setup([f"{key}: type={type(value).__name__}"])
 
 
     def _get_preview_model(self) -> torch.nn.Module:
@@ -720,8 +753,10 @@ class Trainer:
 
     def _run_generation_preview(self, epoch: int) -> dict[str, Any] | None:
         if self.cfg.generation_config_path is None:
-            print(
-                "Skipping generation preview because no generation_config_path is set."
+            log_run_setup(
+                [
+                    "Skipping generation preview because no generation_config_path is set."
+                ]
             )
             return None
 
@@ -741,11 +776,12 @@ class Trainer:
         arrays_path = preview_result.get("arrays_path")
         figure_path = preview_result.get("figure_path")
 
-        print(f"Saved generation preview for epoch {epoch + 1:04d}.")
+        preview_lines = [f"Saved generation preview for epoch {epoch + 1:04d}."]
         if arrays_path is not None:
-            print(f"  Preview arrays: {arrays_path}")
+            preview_lines.append(f"  Preview arrays: {arrays_path}")
         if figure_path is not None:
-            print(f"  Preview figure: {figure_path}")
+            preview_lines.append(f"  Preview figure: {figure_path}")
+        log_run_setup(preview_lines)
 
         return preview_result
 
@@ -764,9 +800,9 @@ class Trainer:
             preview_payload=preview_payload,
             monitoring_config=self.monitoring_config,
         )
-        print("Preview monitoring metrics:")
-        for key, value in metrics.items():
-            print(f"  {key}: {value}")
+        metric_lines = ["Preview monitoring metrics:"]
+        metric_lines.extend([f"  {key}: {value}" for key, value in metrics.items()])
+        log_run_setup(metric_lines)
         return metrics
 
     def _attach_preview_metrics_to_last_valid_history(
@@ -787,7 +823,7 @@ class Trainer:
             preview_metrics_layout=self.monitoring_config.preview_metrics_layout,
         )
         for path in saved_paths:
-            print(f"Saved monitoring plot: {path}")
+            log_run_setup([f"Saved monitoring plot: {path}"])
 
     # ------------------------------------------------------------------
     # device / seed / batch helpers

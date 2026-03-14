@@ -373,7 +373,7 @@ def generate_batch(
             S_min=...,
             S_max=...,
             S_noise=...,
-            doy=None,
+            y=None,
             variable_labels=None,
             return_intermediates=False,
         )
@@ -387,6 +387,7 @@ def generate_batch(
     cond_dynamic = batch.get("cond_dynamic")
     cond_static = batch.get("cond_static")
     meta = batch.get("meta", {})
+    time_features = batch.get("time_features")
 
     if not isinstance(cond_dynamic, torch.Tensor):
         raise TypeError("batch['cond_dynamic'] must be a torch.Tensor")
@@ -407,19 +408,34 @@ def generate_batch(
                 f"got {tuple(cond_static.shape)}"
             )
 
+    if time_features is not None:
+        if not isinstance(time_features, torch.Tensor):
+            raise TypeError(
+                "batch['time_features'] must be a torch.Tensor or None"
+            )
+        if time_features.ndim != 2:
+            raise ValueError(
+                "Expected batch['time_features'] to have shape (B, 2), "
+                f"got {tuple(time_features.shape)}"
+            )
+        if time_features.shape[0] != cond_dynamic.shape[0]:
+            raise ValueError(
+                "batch['time_features'] batch dimension mismatch: "
+                f"expected {cond_dynamic.shape[0]}, got {time_features.shape[0]}"
+            )
+        if time_features.shape[1] != 2:
+            raise ValueError(
+                "batch['time_features'] must have final dimension 2 for "
+                "[sin(DOY), cos(DOY)], got "
+                f"{tuple(time_features.shape)}"
+            )
+        time_features = time_features.to(device=device, dtype=cond_dynamic.dtype)
+
     sampler_kwargs = gen_cfg.to_sampler_kwargs()
 
-    doy: torch.Tensor | None = None
     variable_labels: torch.Tensor | None = None
     if isinstance(meta, dict):
-        raw_doy = meta.get("doy")
         raw_variable_labels = meta.get("variable_labels")
-
-        if isinstance(raw_doy, torch.Tensor):
-            doy = raw_doy.to(device)
-        elif isinstance(raw_doy, list) and len(raw_doy) > 0:
-            if all(isinstance(v, (int, float)) for v in raw_doy):
-                doy = torch.tensor(raw_doy, device=device, dtype=cond_dynamic.dtype)
 
         if isinstance(raw_variable_labels, torch.Tensor):
             variable_labels = raw_variable_labels.to(device)
@@ -435,7 +451,7 @@ def generate_batch(
         model,
         cond_dynamic,
         cond_static=cond_static,
-        doy=doy,
+        y=time_features,
         variable_labels=variable_labels,
         **sampler_kwargs,
     )

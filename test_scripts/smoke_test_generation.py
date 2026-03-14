@@ -1,26 +1,31 @@
 """
 Smoke test for the STRIDE post-training generation pipeline.
 
-This script verifies the first end-to-end generation milestone:
-- load a generation-run config
-- initialize the Generator
-- run generation on a very small number of cases
-- confirm the expected files were written
-- inspect saved ensemble-member outputs, one saved ensemble mean, and one PMM product
+This script now follows the new experiment-driven configuration structure.
+It starts from an experiment config, compiles a tiny smoke-version of that
+experiment, runs training + generation (but skips evaluation), and then checks
+that expected generation artifacts were written.
 
-The goal is not scientific validation yet. It is only a structural test that
-checkpoint loading, dataset construction, sampling, PMM computation, and output
-saving all work coherently together.
+The goal is not scientific validation. It is only a structural test that:
+- experiment config compilation works
+- training produces a checkpoint
+- generation loads that checkpoint
+- dataset construction works
+- sampling runs
+- PMM / ensemble outputs are saved coherently
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 import json
+import shutil
 import sys
+import tempfile
 from typing import Any
 
 import numpy as np
+import yaml
 
 
 if __package__ is None or __package__ == "":
@@ -28,10 +33,18 @@ if __package__ is None or __package__ == "":
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
 
+from stride_core.pipeline.config_compiler import ConfigCompiler
+from stride_core.pipeline.experiment_config import ExperimentConfig
+from stride_core.training.trainer import Trainer
 from stride_core.generation.generator import Generator, GenerationRunConfig
 
 
-DEFAULT_CONFIG = "configs/generation_runs/generate_test_best.yaml"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_EXPERIMENT_CONFIG = (
+    REPO_ROOT / "configs" / "experiments" / "train_generate_evaluate_test.yaml"
+)
+SMOKE_RUN_PARENT = REPO_ROOT / "runs" / "smoke_tests"
+SMOKE_EXPERIMENT_NAME = "smoke_test_generation"
 
 
 # -----------------------------------------------------------------------------
@@ -58,6 +71,148 @@ def summarize_array(name: str, array: np.ndarray) -> None:
 def require_file(path: Path) -> None:
     if not path.exists():
         raise FileNotFoundError(f"Expected file was not created: {path}")
+
+
+
+def _abs_from_root(value: str | None) -> str | None:
+    if value is None:
+        return None
+    path = Path(value)
+    if not path.is_absolute():
+        path = (REPO_ROOT / path).resolve()
+    return str(path)
+
+
+# -----------------------------------------------------------------------------
+# Smoke-config preparation
+# -----------------------------------------------------------------------------
+
+
+def build_smoke_experiment_config(config_path: Path) -> Path:
+    if not config_path.exists():
+        raise FileNotFoundError(f"Experiment config does not exist: {config_path}")
+
+    with open(config_path, "r", encoding="utf-8") as f:
+        payload = yaml.safe_load(f)
+
+    if not isinstance(payload, dict):
+        raise ValueError(
+            f"Expected experiment config to load into a dict, got {type(payload)}"
+        )
+
+    experiment_cfg = payload.get("experiment")
+    stages_cfg = payload.get("stages")
+    bases_cfg = payload.get("bases")
+
+    if not isinstance(experiment_cfg, dict):
+        raise ValueError("Expected top-level 'experiment' section to be a dict")
+    if not isinstance(stages_cfg, dict):
+        raise ValueError("Expected top-level 'stages' section to be a dict")
+    if not isinstance(bases_cfg, dict):
+        raise ValueError("Expected top-level 'bases' section to be a dict")
+
+    experiment_cfg["name"] = SMOKE_EXPERIMENT_NAME
+    experiment_cfg["output_root"] = str(SMOKE_RUN_PARENT.resolve())
+
+    # Training + generation smoke test, but skip evaluation.
+    stages_cfg["training"] = True
+    stages_cfg["generation"] = True
+    stages_cfg["evaluation"] = False
+
+    for key in ("model", "training", "generation", "evaluation", "data"):
+        if key in bases_cfg and bases_cfg.get(key) is not None:
+            bases_cfg[key] = _abs_from_root(bases_cfg.get(key))
+
+    training_cfg = payload.setdefault("training", {})
+    if not isinstance(training_cfg, dict):
+        raise ValueError("Expected top-level 'training' section to be a dict")
+    training_overrides = training_cfg.setdefault("overrides", {})
+    if not isinstance(training_overrides, dict):
+        raise ValueError("Expected 'training.overrides' to be a dict")
+
+    generation_cfg = payload.setdefault("generation", {})
+    if not isinstance(generation_cfg, dict):
+        raise ValueError("Expected top-level 'generation' section to be a dict")
+    generation_overrides = generation_cfg.setdefault("overrides", {})
+    if not isinstance(generation_overrides, dict):
+        raise ValueError("Expected 'generation.overrides' to be a dict")
+
+    # Keep the smoke test tiny and deterministic.
+    training_overrides.update(
+        {
+            "training": {
+                "loop": {
+                    "max_epochs": 1,
+                    "max_train_batches": 2,
+                    "max_val_batches": 1,
+                    "validate_every_n_epochs": 1,
+                },
+                "checkpointing": {
+                    "enabled": True,
+                    "save_every_n_epochs": 1,
+                    "save_best": True,
+                    "resume_from": None,
+                },
+                "data": {
+                    "num_workers": 0,
+                },
+                "validation": {
+                    "enabled": True,
+                },
+            }
+        }
+    )
+
+    # Ensure generation stays tiny.
+    generation_overrides.setdefault("generation_run", {})
+    if not isinstance(generation_overrides["generation_run"], dict):
+        raise ValueError("Expected 'generation.overrides.generation_run' to be a dict")
+    generation_run_overrides = generation_overrides["generation_run"]
+
+    generation_run_overrides.setdefault("data", {})
+    if not isinstance(generation_run_overrides["data"], dict):
+        raise ValueError("Expected 'generation.overrides.generation_run.data' to be a dict")
+    generation_run_overrides["data"]["split"] = "test"
+    generation_run_overrides["data"]["batch_size"] = 1
+    generation_run_overrides["data"]["num_workers"] = 0
+    generation_run_overrides["data"]["pin_memory"] = False
+    generation_run_overrides["data"]["shuffle"] = False
+
+    generation_run_overrides.setdefault("sampling", {})
+    if not isinstance(generation_run_overrides["sampling"], dict):
+        raise ValueError(
+            "Expected 'generation.overrides.generation_run.sampling' to be a dict"
+        )
+    generation_run_overrides["sampling"]["ensemble_size"] = 3
+    generation_run_overrides["sampling"]["use_fixed_seed"] = True
+    generation_run_overrides["sampling"]["base_seed"] = 42
+
+    generation_run_overrides.setdefault("limits", {})
+    if not isinstance(generation_run_overrides["limits"], dict):
+        raise ValueError(
+            "Expected 'generation.overrides.generation_run.limits' to be a dict"
+        )
+    generation_run_overrides["limits"]["max_cases"] = 2
+
+    generation_run_overrides.setdefault("outputs", {})
+    if not isinstance(generation_run_overrides["outputs"], dict):
+        raise ValueError(
+            "Expected 'generation.overrides.generation_run.outputs' to be a dict"
+        )
+    generation_run_overrides["outputs"]["save_members"] = True
+    generation_run_overrides["outputs"]["save_pmm"] = True
+    generation_run_overrides["outputs"]["save_ensemble_mean"] = True
+    generation_run_overrides["outputs"]["save_plots"] = False
+    generation_run_overrides["outputs"]["save_physical"] = True
+    generation_run_overrides["outputs"]["output_format"] = "npz"
+    generation_run_overrides["outputs"]["storage_mode"] = "per_member_bundle"
+
+    temp_dir = Path(tempfile.mkdtemp(prefix="stride_generation_smoke_"))
+    temp_config_path = temp_dir / config_path.name
+    with open(temp_config_path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(payload, f, sort_keys=False)
+
+    return temp_config_path
 
 
 # -----------------------------------------------------------------------------
@@ -96,15 +251,56 @@ def inspect_json(json_path: Path) -> dict[str, Any]:
 
 
 def main() -> None:
-    config_path = Path(DEFAULT_CONFIG).resolve()
-
     print_header("STRIDE generation smoke test")
-    print(f"Generation config: {config_path}")
+    print(f"Experiment config: {DEFAULT_EXPERIMENT_CONFIG}")
 
-    cfg = GenerationRunConfig.from_yaml(config_path)
+    smoke_config_path = build_smoke_experiment_config(DEFAULT_EXPERIMENT_CONFIG)
+    print_header("Smoke experiment config written")
+    print(f"Smoke config: {smoke_config_path}")
+
+    exp_cfg = ExperimentConfig.from_yaml(smoke_config_path)
+    compiler = ConfigCompiler(exp_cfg)
+    compiled = compiler.compile()
+
+    experiment_root = compiled.experiment_root
+    training_output_dir = experiment_root / "training"
+    generation_output_dir = experiment_root / "generation"
+
+    if experiment_root.exists():
+        shutil.rmtree(experiment_root)
+        compiled = compiler.compile()
+        experiment_root = compiled.experiment_root
+        training_output_dir = experiment_root / "training"
+        generation_output_dir = experiment_root / "generation"
+
+    print_header("Compiled smoke configs")
+    print(f"Training config:   {compiled.training_run_config_path}")
+    print(f"Generation config: {compiled.generation_run_config_path}")
+    print(f"Experiment root:   {experiment_root}")
+
+    print_header("Initializing trainer")
+    trainer = Trainer(compiled.training_run_config_path)
+    print("Trainer initialized successfully.")
+
+    print_header("Running smoke training")
+    trainer.fit()
+    print("Smoke training completed successfully.")
+
+    checkpoint_dir = training_output_dir / "checkpoints"
+    latest_checkpoint = checkpoint_dir / "checkpoint_latest.pt"
+    best_checkpoint = checkpoint_dir / "checkpoint_best.pt"
+    epoch_checkpoint = checkpoint_dir / "checkpoint_epoch_0001.pt"
+
+    require_file(latest_checkpoint)
+    require_file(epoch_checkpoint)
+    require_file(best_checkpoint)
+
+    print_header("Loading generation config")
+    gen_cfg = GenerationRunConfig.from_yaml(compiled.generation_run_config_path)
+    print(f"Generation config loaded from: {compiled.generation_run_config_path}")
 
     print_header("Initializing generator")
-    generator = Generator(cfg)
+    generator = Generator(gen_cfg)
     print("Generator initialized successfully.")
 
     print_header("Running generation")
@@ -122,7 +318,7 @@ def main() -> None:
     case_dirs = sorted([path for path in samples_dir.iterdir() if path.is_dir()])
     print(f"Found {len(case_dirs)} case directories in: {samples_dir}")
 
-    expected_cases = cfg.limits.max_cases if cfg.limits.max_cases is not None else len(case_dirs)
+    expected_cases = gen_cfg.limits.max_cases if gen_cfg.limits.max_cases is not None else len(case_dirs)
     if len(case_dirs) != expected_cases:
         raise AssertionError(
             f"Expected {expected_cases} case directories, found {len(case_dirs)}"
@@ -131,7 +327,7 @@ def main() -> None:
     first_case_dir = case_dirs[0]
     print(f"Inspecting first case directory: {first_case_dir}")
 
-    storage_mode = cfg.outputs.storage_mode
+    storage_mode = gen_cfg.outputs.storage_mode
     if storage_mode == "per_member":
         member_path = first_case_dir / "member_0000.npz"
         member_json_path = first_case_dir / "member_0000.json"
@@ -149,14 +345,14 @@ def main() -> None:
     member_arrays = inspect_npz(member_path)
     member_meta = inspect_json(member_json_path)
 
-    if cfg.outputs.save_ensemble_mean:
+    if gen_cfg.outputs.save_ensemble_mean:
         ensemble_arrays = inspect_npz(ensemble_mean_path)
         ensemble_meta = inspect_json(ensemble_mean_json_path)
     else:
         ensemble_arrays = None
         ensemble_meta = None
 
-    if cfg.outputs.save_pmm:
+    if gen_cfg.outputs.save_pmm:
         pmm_arrays = inspect_npz(pmm_path)
         pmm_meta = inspect_json(pmm_json_path)
     else:
@@ -213,7 +409,7 @@ def main() -> None:
         generated_members = member_arrays["generated_members"]
         target_physical = member_arrays["target_physical"]
 
-        if generated_members.shape[0] != cfg.sampling.ensemble_size:
+        if generated_members.shape[0] != gen_cfg.sampling.ensemble_size:
             raise AssertionError(
                 "Expected generated_members leading dimension to equal ensemble size, got "
                 f"{generated_members.shape}"
@@ -227,7 +423,7 @@ def main() -> None:
             raise AssertionError(
                 "Expected ensemble bundle metadata aggregate_name='ensemble_members'"
             )
-        if member_meta.get("ensemble_size") != cfg.sampling.ensemble_size:
+        if member_meta.get("ensemble_size") != gen_cfg.sampling.ensemble_size:
             raise AssertionError(
                 "Expected ensemble bundle metadata ensemble_size to match config"
             )
@@ -237,7 +433,7 @@ def main() -> None:
     else:
         raise ValueError(f"Unsupported storage_mode in structural assertions: {storage_mode!r}")
 
-    if cfg.outputs.save_ensemble_mean:
+    if gen_cfg.outputs.save_ensemble_mean:
         assert ensemble_arrays is not None
         assert ensemble_meta is not None
         if "generated_physical" not in ensemble_arrays:
@@ -247,7 +443,7 @@ def main() -> None:
                 "ensemble_mean metadata missing aggregate_name='ensemble_mean'"
             )
 
-    if cfg.outputs.save_pmm:
+    if gen_cfg.outputs.save_pmm:
         assert pmm_arrays is not None
         assert pmm_meta is not None
         if "generated_physical" not in pmm_arrays:
