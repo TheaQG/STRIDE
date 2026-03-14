@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+import logging
 from pathlib import Path
 from typing import Any
 import json
@@ -69,6 +70,7 @@ class ExperimentRunner:
     def __init__(self, cfg: ExperimentConfig):
         self.cfg = cfg
         self.repo_root = self._infer_repo_root()
+        self.logger = logging.getLogger(__name__)
 
         self.logs_dir = (
             self.repo_root / "runs" / "pipeline_logs" / self.cfg.meta.name
@@ -87,11 +89,11 @@ class ExperimentRunner:
         start_ts = time.time()
         started_at = self._utc_now_iso()
 
-        self._print_header("STRIDE full experiment")
-        print(f"Experiment name: {self.cfg.meta.name}")
-        print(f"Experiment config: {self.cfg.config_path}")
-        print(f"Repository root: {self.repo_root}")
-        print(f"Logs dir: {self.logs_dir}")
+        self.logger.info(self._format_header("STRIDE full experiment"))
+        self.logger.info(f"Experiment name: {self.cfg.meta.name}")
+        self.logger.info(f"Experiment config: {self.cfg.config_path}")
+        self.logger.info(f"Repository root: {self.repo_root}")
+        self.logger.info(f"Logs dir: {self.logs_dir}")
 
         stage_summaries: dict[str, StageRunSummary] = {}
         overall_success = True
@@ -131,9 +133,9 @@ class ExperimentRunner:
             self._save_experiment_summary(experiment_summary)
 
         if overall_success:
-            print("\nFull pipeline completed successfully.")
+            self.logger.info("Full pipeline completed successfully.")
         else:
-            print("\nFull pipeline stopped because a stage failed.")
+            self.logger.error("Full pipeline stopped because a stage failed.")
 
         return experiment_summary
 
@@ -149,7 +151,7 @@ class ExperimentRunner:
     ) -> StageRunSummary:
 
         if not enabled:
-            print(f"\n[{stage_name}] Skipped (disabled in experiment config).")
+            self.logger.info(f"[{stage_name}] Skipped (disabled in experiment config).")
 
             return StageRunSummary(
                 name=stage_name,
@@ -171,11 +173,11 @@ class ExperimentRunner:
 
         command = [sys.executable, str(stage_script), "--config", str(config_path)]
 
-        self._print_header(f"Running stage: {stage_name}")
-        print(f"Config: {config_path}")
-        print(f"Script: {stage_script}")
-        print(f"Stdout: {stdout_path}")
-        print(f"Stderr: {stderr_path}")
+        self.logger.info(self._format_header(f"Running stage: {stage_name}"))
+        self.logger.info(f"Config: {config_path}")
+        self.logger.info(f"Script: {stage_script}")
+        self.logger.info(f"Stdout: {stdout_path}")
+        self.logger.info(f"Stderr: {stderr_path}")
 
         start_ts = time.time()
 
@@ -196,14 +198,14 @@ class ExperimentRunner:
         duration = time.time() - start_ts
         success = process.returncode == 0
 
-        print(
+        self.logger.info(
             f"[{stage_name}] return_code={process.returncode} duration={duration:.2f}s success={success}"
         )
 
         if not success:
-            print(f"[{stage_name}] See logs for details:")
-            print(f"  stdout: {stdout_path}")
-            print(f"  stderr: {stderr_path}")
+            self.logger.error(f"[{stage_name}] See logs for details:")
+            self.logger.error(f"  stdout: {stdout_path}")
+            self.logger.error(f"  stderr: {stderr_path}")
 
         return StageRunSummary(
             name=stage_name,
@@ -266,7 +268,7 @@ class ExperimentRunner:
         with open(summary_path, "w", encoding="utf-8") as f:
             json.dump(self._to_serializable(summary), f, indent=2)
 
-        print(f"\nSaved experiment summary: {summary_path}")
+        self.logger.info(f"Saved experiment summary: {summary_path}")
 
     def _to_serializable(self, value: Any) -> Any:
         if hasattr(value, "__dataclass_fields__"):
@@ -282,9 +284,9 @@ class ExperimentRunner:
 
         return value
 
-    def _print_header(self, title: str) -> None:
+    def _format_header(self, title: str) -> str:
         line = "=" * len(title)
-        print(f"\n{line}\n{title}\n{line}")
+        return f"\n{line}\n{title}\n{line}"
 
     def _utc_now_iso(self) -> str:
         return datetime.now(timezone.utc).replace(microsecond=0).isoformat()

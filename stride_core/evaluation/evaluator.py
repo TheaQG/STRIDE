@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 import json
 import time
+import logging
 
 from stride_core.evaluation.evaluation_config import EvaluationRunConfig
 from stride_core.evaluation.data_loading import EvaluationDataLoader
@@ -55,6 +56,8 @@ from stride_core.evaluation.metrics.temporal import (
     compute_lag_autocorrelation,
     compute_wet_spell_lengths,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class Evaluator:
@@ -129,7 +132,7 @@ class Evaluator:
         self._save_metrics()
 
         elapsed = time.time() - start_time
-        print(f"\nEvaluation completed in {elapsed:.2f} seconds")
+        logger.info(f"\nEvaluation completed in {elapsed:.2f} seconds")
 
     # ------------------------------------------------------------------
     # Metric family dispatch
@@ -138,7 +141,7 @@ class Evaluator:
     def run_probabilistic_metrics(self, cases) -> None:
         """Run ensemble probabilistic verification metrics."""
 
-        print("\nRunning probabilistic metrics...")
+        logger.info("\nRunning probabilistic metrics...")
 
         case_level: dict[str, Any] = {}
         forecast_list = []
@@ -242,7 +245,7 @@ class Evaluator:
     def run_spatial_metrics(self, cases) -> None:
         """Run spatial structure metrics."""
 
-        print("\nRunning spatial metrics...")
+        logger.info("\nRunning spatial metrics...")
 
         case_level: dict[str, Any] = {}
         forecast_list = []
@@ -344,7 +347,7 @@ class Evaluator:
     def run_climatology_metrics(self, cases) -> None:
         """Run climatological/statistical diagnostics."""
 
-        print("\nRunning climatology metrics...")
+        logger.info("\nRunning climatology metrics...")
 
         case_level: dict[str, Any] = {}
         forecast_list = []
@@ -467,7 +470,7 @@ class Evaluator:
     def run_temporal_metrics(self, cases) -> None:
         """Run temporal persistence / spell diagnostics."""
 
-        print("\nRunning temporal metrics...")
+        logger.info("\nRunning temporal metrics...")
 
         case_level: dict[str, Any] = {}
         sequence_dates: list[str] = []
@@ -537,7 +540,7 @@ class Evaluator:
     def run_sigma_star_analysis(self, cases) -> None:
         """Run σ* analysis for scale-aware verification."""
 
-        print("\nRunning sigma-star analysis...")
+        logger.info("\nRunning sigma-star analysis...")
 
         results = {
             "sigma_values": self.cfg.sigma_star.values,
@@ -666,14 +669,13 @@ class Evaluator:
     # ------------------------------------------------------------------
 
     def _print_run_summary(self) -> None:
-
-        print("\n===========================")
-        print("STRIDE evaluation run")
-        print("===========================")
-        print(f"Run name:        {self.cfg.run_name}")
-        print(f"Cases found:     {len(self.loader)}")
-        print(f"Output dir:      {self.output_dir}")
-        print(f"Generation dir:  {self.cfg.paths.generation_output_dir}")
+        logger.info("\n===========================")
+        logger.info("STRIDE evaluation run")
+        logger.info("===========================")
+        logger.info(f"Run name:        {self.cfg.run_name}")
+        logger.info(f"Cases found:     {len(self.loader)}")
+        logger.info(f"Output dir:      {self.output_dir}")
+        logger.info(f"Generation dir:  {self.cfg.paths.generation_output_dir}")
 
     def _save_metrics(self) -> None:
 
@@ -685,7 +687,7 @@ class Evaluator:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(self.metrics, f, indent=2)
 
-        print(f"Saved metrics to {path}")
+        logger.info(f"Saved metrics to {path}")
 
     # ------------------------------------------------------------------
     # Feature switches

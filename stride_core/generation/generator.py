@@ -31,10 +31,13 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
+import logging
 import torch
 from torch.utils.data import DataLoader
 import yaml
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 from stride_core.configs.adapter_config import AdapterConfig
 from stride_core.generation.generation_utils import (
@@ -394,7 +397,7 @@ class Generator:
             generated_case_count += processed_cases
 
         if self.cfg.outputs.save_plots:
-            print(
+            logger.info(
                 "Full-run generation plotting was requested, but plotting is not implemented yet in this first generator version."
             )
 
@@ -801,32 +804,33 @@ class Generator:
     # ------------------------------------------------------------------
 
     def _print_run_summary(self) -> None:
-        print("\n=======================")
-        print("STRIDE generation run")
-        print("=======================")
-        print(f"Run name:          {self.cfg.run_name}")
-        print(f"Device:            {self.device}")
-        print(f"Output dir:        {self.output_dir}")
-        print(f"Samples dir:       {self.samples_dir}")
-        print(f"Dataset config:    {self.cfg.paths.dataset_config_path}")
-        print(f"Model config:      {self.cfg.paths.model_config_path}")
-        print(f"Generation config: {self.cfg.paths.generation_config_path}")
-        print(f"Checkpoint path:   {self.checkpoint_path}")
-        print(f"Split:             {self.cfg.data.split}")
-        print(f"Shuffle:           {self.cfg.data.shuffle}")
+        logger.info("\n=======================")
+        logger.info("STRIDE generation run")
+        logger.info("=======================")
+        logger.info(f"Run name:          {self.cfg.run_name}")
+        logger.info(f"Device:            {self.device}")
+        logger.info(f"Output dir:        {self.output_dir}")
+        logger.info(f"Samples dir:       {self.samples_dir}")
+        logger.info(f"Dataset config:    {self.cfg.paths.dataset_config_path}")
+        logger.info(f"Model config:      {self.cfg.paths.model_config_path}")
+        logger.info(f"Generation config: {self.cfg.paths.generation_config_path}")
+        logger.info(f"Checkpoint path:   {self.checkpoint_path}")
+        logger.info(f"Split:             {self.cfg.data.split}")
+        logger.info(f"Shuffle:           {self.cfg.data.shuffle}")
 
         dataset_len = self._safe_len(self.dataset)
         loader_len = self._safe_len(self.loader)
-        print(
+
+        logger.info(
             f"Dataset length:    {'unknown' if dataset_len is None else dataset_len}"
         )
-        print(
+        logger.info(
             f"Num batches:       {'unknown' if loader_len is None else loader_len}"
         )
-        print(f"Ensemble size:     {self.cfg.sampling.ensemble_size}")
-        print(f"Max cases:         {self.cfg.limits.max_cases}")
-        print(f"Save members:      {self.cfg.outputs.save_members}")
-        print(f"Save ens. mean:    {self.cfg.outputs.save_ensemble_mean}")
-        print(f"Save PMM:          {self.cfg.outputs.save_pmm}")
-        print(f"Storage mode:      {self.cfg.outputs.storage_mode}")
-        print(f"Use EMA weights:   {self.cfg.checkpoint.use_ema_weights}")
+        logger.info(f"Ensemble size:     {self.cfg.sampling.ensemble_size}")
+        logger.info(f"Max cases:         {self.cfg.limits.max_cases}")
+        logger.info(f"Save members:      {self.cfg.outputs.save_members}")
+        logger.info(f"Save ens. mean:    {self.cfg.outputs.save_ensemble_mean}")
+        logger.info(f"Save PMM:          {self.cfg.outputs.save_pmm}")
+        logger.info(f"Storage mode:      {self.cfg.outputs.storage_mode}")
+        logger.info(f"Use EMA weights:   {self.cfg.checkpoint.use_ema_weights}")

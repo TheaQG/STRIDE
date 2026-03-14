@@ -17,10 +17,12 @@ Responsibilities
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 import json
 from pathlib import Path
 from typing import Any
 
+logger = logging.getLogger(__name__)
 
 # -----------------------------------------------------------------------------
 # Formatting helpers
@@ -29,12 +31,10 @@ from typing import Any
 
 def print_section(title: str) -> None:
     """
-    Print a section header.
+    Log a section header.
     """
-    print("\n" + "=" * len(title))
-    print(title)
-    print("=" * len(title))
-
+    line = "=" * len(title)
+    logger.info(f"\n{line}\n{title}\n{line}")
 
 
 def format_metric(value: float | int | None, precision: int = 6) -> str:
@@ -46,7 +46,6 @@ def format_metric(value: float | int | None, precision: int = 6) -> str:
     if isinstance(value, int):
         return str(value)
     return f"{float(value):.{precision}f}"
-
 
 
 def format_epoch_summary(
@@ -84,6 +83,12 @@ def format_epoch_summary(
     return " ".join(parts)
 
 
+def log_epoch_summary(message: str) -> None:
+    """
+    Log a formatted epoch summary line.
+    """
+    logger.info(message)
+
 
 def format_step_progress(
     stage: str,
@@ -105,6 +110,12 @@ def format_step_progress(
         f"loss={loss_value:.6f}"
     )
 
+
+def log_step_progress(message: str) -> None:
+    """
+    Log a formatted step progress line.
+    """
+    logger.info(message)
 
 
 def summarize_run_setup(
@@ -139,6 +150,14 @@ def summarize_run_setup(
         f"Trainable params:   {trainable_params:,}",
         f"EMA enabled:        {ema_enabled}",
     ]
+
+
+def log_run_setup(lines: list[str]) -> None:
+    """
+    Log formatted run-setup lines.
+    """
+    for line in lines:
+        logger.info(line)
 
 
 # -----------------------------------------------------------------------------
