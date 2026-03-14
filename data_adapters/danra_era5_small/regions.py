@@ -1,14 +1,16 @@
 """
 Region and cropping utilities for the small DANRA/ERA5 STRIDE adapter.
-First pass responsibilities:
-    - Fixed full-domain selection
+
+Current responsibilities:
+    - Full-domain shape validation
     - Optional fixed crop
+    - Train-time spatial shuffle validation
     - Coordinate bookkeeping
 
-Later extensions:
-    - Random spatial shuffle
+Potential later extensions:
     - Anchored input/output offsets
     - Larger context
+    - Non-square regional specializations
 """
 
 from __future__ import annotations
@@ -74,6 +76,39 @@ class RegionInfo:
         }
 
 
+def validate_cutout_domain(
+    cutout_domain: tuple[int, int, int, int],
+    full_shape: tuple[int, int],
+) -> None:
+    """
+    Validate that a cutout domain lies fully within a 2D field.
+
+    Parameters
+    ----------
+    cutout_domain
+        Tuple `(x1, x2, y1, y2)` describing the valid spatial-shuffle region.
+    full_shape
+        Full 2D shape `(H, W)` of the available field.
+    """
+    full_height, full_width = full_shape
+    x1, x2, y1, y2 = cutout_domain
+
+    if x1 < 0 or y1 < 0:
+        raise ValueError(
+            f"Cutout domain lower bounds must be non-negative, got {(x1, x2, y1, y2)}"
+        )
+    if x2 <= x1 or y2 <= y1:
+        raise ValueError(
+            "Cutout domain must satisfy x2 > x1 and y2 > y1, got "
+            f"{(x1, x2, y1, y2)}"
+        )
+    if x2 > full_width or y2 > full_height:
+        raise ValueError(
+            "Cutout domain exceeds available field shape: "
+            f"cutout={(x1, x2, y1, y2)} full_shape={(full_height, full_width)}"
+        )
+
+
 def validate_crop_spec(crop_spec: CropSpec, full_shape: tuple[int, int]) -> None:
     """
     Validate that a crop lies fully within a 2D field.
@@ -105,14 +140,54 @@ def validate_crop_spec(crop_spec: CropSpec, full_shape: tuple[int, int]) -> None
         )
 
 
+def validate_crop_within_cutout(
+    crop_spec: CropSpec,
+    cutout_domain: tuple[int, int, int, int],
+    full_shape: tuple[int, int],
+) -> None:
+    """
+    Validate that a crop lies fully inside a validated cutout domain.
+
+    Parameters
+    ----------
+    crop_spec
+        Crop to validate.
+    cutout_domain
+        Tuple `(x1, x2, y1, y2)` describing the allowed spatial-shuffle region.
+    full_shape
+        Full 2D shape `(H, W)` of the available field.
+    """
+    validate_crop_spec(crop_spec, full_shape=full_shape)
+    validate_cutout_domain(cutout_domain, full_shape=full_shape)
+
+    x1, x2, y1, y2 = cutout_domain
+
+    if crop_spec.anchor_x < x1 or crop_spec.anchor_y < y1:
+        raise ValueError(
+            "Crop anchor lies outside cutout domain lower bounds: "
+            f"crop={(crop_spec.anchor_y, crop_spec.anchor_x, crop_spec.height, crop_spec.width)} "
+            f"cutout={(x1, x2, y1, y2)}"
+        )
+    if crop_spec.anchor_x + crop_spec.width > x2:
+        raise ValueError(
+            "Crop exceeds cutout domain width bounds: "
+            f"crop_right={crop_spec.anchor_x + crop_spec.width} x2={x2}"
+        )
+    if crop_spec.anchor_y + crop_spec.height > y2:
+        raise ValueError(
+            "Crop exceeds cutout domain height bounds: "
+            f"crop_bottom={crop_spec.anchor_y + crop_spec.height} y2={y2}"
+        )
+
+
 def crop_2d_field(array: np.ndarray, crop_spec: CropSpec) -> np.ndarray:
     """
     Crop a 2D array of shape [H, W].
     """
     if array.ndim != 2:
         raise ValueError(f"Expected 2D array [H, W], got shape {array.shape}")
-
-    validate_crop_spec(crop_spec, full_shape=array.shape) # type: ignore
+    height, width = array.shape
+    validate_crop_spec(crop_spec, full_shape=(height, width))
     return array[crop_spec.y_slice, crop_spec.x_slice]
 
 
@@ -147,7 +222,10 @@ def maybe_crop_field(array: np.ndarray, crop_spec: CropSpec | None) -> np.ndarra
     )
 
 
-def build_region_info(full_shape: tuple[int, int], crop_spec: CropSpec | None) -> RegionInfo:
+def build_region_info(
+    full_shape: tuple[int, int],
+    crop_spec: CropSpec | None,
+) -> RegionInfo:
     """
     Build region metadata for the current spatial selection.
 
@@ -212,7 +290,7 @@ def crop_sample_fields(
             f"Expected cond_static with shape [C_static, H, W], got {cond_static.shape}"
         )
 
-    full_shape = target.shape
+    full_shape = (target.shape[0], target.shape[1])
     if cond_dynamic.shape[1:] != full_shape:
         raise ValueError(
             f"Target and cond_dynamic spatial shapes must match, got "
@@ -227,7 +305,7 @@ def crop_sample_fields(
     cropped_target = maybe_crop_field(target, crop_spec)
     cropped_cond_dynamic = maybe_crop_field(cond_dynamic, crop_spec)
     cropped_cond_static = maybe_crop_field(cond_static, crop_spec) if cond_static is not None else None
-    region_info = build_region_info(full_shape=full_shape, crop_spec=crop_spec) # type: ignore
+    region_info = build_region_info(full_shape=full_shape, crop_spec=crop_spec)
 
     return {
         "target": cropped_target,

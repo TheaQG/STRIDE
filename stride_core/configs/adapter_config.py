@@ -1,5 +1,3 @@
-
-
 """
 Shared adapter configuration schema for STRIDE.
 
@@ -24,12 +22,12 @@ data:
     source: DANRA
 
   conditioning:
-    source: ERA5
-    variables: [prcp, temp]
-
-  statics:
-    source: STATIC
-    variables: [lsm, topo]
+    dynamic:
+      source: ERA5
+      variables: [prcp, temp]
+    static:
+      source: STATIC
+      variables: [lsm, topo]
 
   domain:
     tag: dk_128x128
@@ -38,6 +36,11 @@ data:
       anchor_x: 380
       height: 128
       width: 128
+
+    spatial_shuffle:
+      enabled: false
+      train_only: true
+      cutout_domain: [170, 350, 340, 520]   # [x1, x2, y1, y2]
 
   transforms:
     apply: true
@@ -87,6 +90,9 @@ class AdapterConfig:
     static_source: str = "STATIC"
     apply_transforms: bool = True
     split_stats_tag: str | None = None
+    spatial_shuffle_enabled: bool = False
+    spatial_shuffle_train_only: bool = True
+    spatial_shuffle_cutout_domain: tuple[int, int, int, int] | None = None
 
     @classmethod
     def from_yaml(cls, yaml_path: str | Path) -> "AdapterConfig":
@@ -128,10 +134,28 @@ class AdapterConfig:
         split_cfg = data_cfg.get("split", {})
         target_cfg = data_cfg.get("target", {})
         conditioning_cfg = data_cfg.get("conditioning", {})
-        statics_cfg = data_cfg.get("statics", {})
         domain_cfg = data_cfg.get("domain", {})
         transforms_cfg = data_cfg.get("transforms", {})
         crop_cfg = domain_cfg.get("crop")
+        spatial_shuffle_cfg = domain_cfg.get("spatial_shuffle", {})
+
+        dynamic_cfg: dict[str, Any]
+        static_cfg: dict[str, Any]
+
+        # New nested schema:
+        #   data.conditioning.dynamic.{source,variables}
+        #   data.conditioning.static.{source,variables}
+        # Backward-compatible fallback:
+        #   data.conditioning.{source,variables}
+        #   data.statics.{source,variables}
+        if isinstance(conditioning_cfg, dict) and (
+            "dynamic" in conditioning_cfg or "static" in conditioning_cfg
+        ):
+            dynamic_cfg = conditioning_cfg.get("dynamic", {})
+            static_cfg = conditioning_cfg.get("static", {})
+        else:
+            dynamic_cfg = conditioning_cfg
+            static_cfg = data_cfg.get("statics", {})
 
         if not isinstance(split_cfg, dict):
             raise ValueError("Expected 'data.split' to be a dict")
@@ -139,14 +163,26 @@ class AdapterConfig:
             raise ValueError("Expected 'data.target' to be a dict")
         if not isinstance(conditioning_cfg, dict):
             raise ValueError("Expected 'data.conditioning' to be a dict")
-        if not isinstance(statics_cfg, dict):
-            raise ValueError("Expected 'data.statics' to be a dict")
+        if not isinstance(dynamic_cfg, dict):
+            raise ValueError(
+                "Expected dynamic conditioning config to be a dict "
+                "(either 'data.conditioning.dynamic' or legacy 'data.conditioning')"
+            )
+        if not isinstance(static_cfg, dict):
+            raise ValueError(
+                "Expected static conditioning config to be a dict "
+                "(either 'data.conditioning.static' or legacy 'data.statics')"
+            )
         if not isinstance(domain_cfg, dict):
             raise ValueError("Expected 'data.domain' to be a dict")
         if not isinstance(transforms_cfg, dict):
             raise ValueError("Expected 'data.transforms' to be a dict")
         if crop_cfg is not None and not isinstance(crop_cfg, dict):
             raise ValueError("Expected 'data.domain.crop' to be a dict or null")
+        if not isinstance(spatial_shuffle_cfg, dict):
+            raise ValueError(
+                "Expected 'data.domain.spatial_shuffle' to be a dict"
+            )
 
         manifest_path = split_cfg.get("manifest_path")
         if manifest_path is None:
@@ -168,6 +204,28 @@ class AdapterConfig:
                 int(crop_cfg["width"]),
             )
 
+        cutout_domain_raw = spatial_shuffle_cfg.get("cutout_domain")
+        spatial_shuffle_cutout_domain: tuple[int, int, int, int] | None
+        if cutout_domain_raw is None:
+            spatial_shuffle_cutout_domain = None
+        else:
+            if not isinstance(cutout_domain_raw, (list, tuple)):
+                raise ValueError(
+                    "Expected 'data.domain.spatial_shuffle.cutout_domain' to be a "
+                    "list or tuple of length 4"
+                )
+            if len(cutout_domain_raw) != 4:
+                raise ValueError(
+                    "Expected 'data.domain.spatial_shuffle.cutout_domain' to have "
+                    f"length 4, got {len(cutout_domain_raw)}"
+                )
+            spatial_shuffle_cutout_domain = (
+                int(cutout_domain_raw[0]),
+                int(cutout_domain_raw[1]),
+                int(cutout_domain_raw[2]),
+                int(cutout_domain_raw[3]),
+            )
+
         return cls(
             root_dir=data_cfg.get("root_dir", DEFAULT_ROOT_DIR),
             size_tag=data_cfg.get("size_tag", DEFAULT_SIZE_TAG),
@@ -175,14 +233,23 @@ class AdapterConfig:
             split_name=str(split_cfg.get("name", "train")),
             domain_tag=str(domain_cfg.get("tag", "dk_128x128")),
             crop=crop_tuple,
+            spatial_shuffle_enabled=bool(
+                spatial_shuffle_cfg.get("enabled", False)
+            ),
+            spatial_shuffle_train_only=bool(
+                spatial_shuffle_cfg.get("train_only", True)
+            ),
+            spatial_shuffle_cutout_domain=spatial_shuffle_cutout_domain,
             target_variable=str(target_cfg.get("variable", "prcp")),
             target_source=str(target_cfg.get("source", "DANRA")),
             dynamic_variables=tuple(
-                conditioning_cfg.get("variables", DEFAULT_DYNAMIC_VARIABLES)
+                dynamic_cfg.get("variables", DEFAULT_DYNAMIC_VARIABLES)
             ),
-            dynamic_source=str(conditioning_cfg.get("source", "ERA5")),
-            static_variables=tuple(statics_cfg.get("variables", DEFAULT_STATIC_VARIABLES)),
-            static_source=str(statics_cfg.get("source", "STATIC")),
+            dynamic_source=str(dynamic_cfg.get("source", "ERA5")),
+            static_variables=tuple(
+                static_cfg.get("variables", DEFAULT_STATIC_VARIABLES)
+            ),
+            static_source=str(static_cfg.get("source", "STATIC")),
             apply_transforms=bool(transforms_cfg.get("apply", True)),
             split_stats_tag=(
                 str(split_cfg["stats_tag"])
@@ -241,3 +308,26 @@ class AdapterConfig:
             "height": height,
             "width": width,
         }
+
+
+    @property
+    def spatial_shuffle_dict(self) -> dict[str, Any]:
+        """
+        Convenience representation of spatial shuffling settings.
+        """
+        return {
+            "enabled": self.spatial_shuffle_enabled,
+            "train_only": self.spatial_shuffle_train_only,
+            "cutout_domain": (
+                None
+                if self.spatial_shuffle_cutout_domain is None
+                else list(self.spatial_shuffle_cutout_domain)
+            ),
+        }
+
+    @property
+    def has_spatial_shuffle(self) -> bool:
+        """
+        Whether spatial shuffling is enabled in the adapter config.
+        """
+        return self.spatial_shuffle_enabled
