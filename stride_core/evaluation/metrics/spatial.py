@@ -56,6 +56,8 @@ class PSDCaseResult:
     wavelengths_km: list[float]
     forecast_psd: list[float]
     target_psd: list[float]
+    forecast_member_psd: list[list[float]]
+    num_members: int
     num_points: int
 
 
@@ -65,6 +67,8 @@ class PSDResult:
     mean_wavelengths_km: list[float]
     mean_forecast_psd: list[float]
     mean_target_psd: list[float]
+    mean_forecast_member_psd: list[list[float]]
+    num_members: int
     num_cases: int
 
 
@@ -294,74 +298,293 @@ def compute_psd(
     *,
     dx_km: float = 1.0,
 ) -> PSDResult:
-    forecast_bhw, target_bhw, mask_bhw = _normalize_inputs(forecast, target, mask)
+    """
+    Compute isotropic radial PSD diagnostics with optional ensemble support.
+
+    Supported forecast/target shape combinations
+    --------------------------------------------
+    Deterministic single case:
+        forecast: [H, W]
+        target:   [H, W]
+
+    Deterministic batch:
+        forecast: [B, H, W] or [B, 1, H, W]
+        target:   [B, H, W], [B, 1, H, W], [H, W], or [1, H, W]
+
+    Ensemble single case:
+        forecast: [M, H, W]
+        target:   [H, W] or [1, H, W]
+
+    Ensemble batch:
+        forecast: [B, M, H, W]
+        target:   [B, H, W], [B, 1, H, W], [H, W], or [1, H, W]
+
+    Notes
+    -----
+    - Each case stores PSD for every ensemble member separately.
+    - `forecast_psd` is the per-case ensemble-mean PSD.
+    - `mean_forecast_psd` is the mean of those per-case ensemble-mean PSDs.
+    - `mean_forecast_member_psd` preserves a member axis across cases using the
+      minimum common member count.
+    """
+
+    def _normalize_target_cases(
+        target_in: ArrayLike,
+        *,
+        batch_size: int,
+    ) -> np.ndarray:
+        arr = _as_numpy(target_in, name="target")
+
+        if arr.ndim == 2:
+            arr = arr[np.newaxis, ...]
+        elif arr.ndim == 3:
+            pass
+        elif arr.ndim == 4:
+            if arr.shape[1] != 1:
+                raise ValueError(
+                    f"4D target must have channel dimension 1, got {tuple(arr.shape)}"
+                )
+            arr = arr[:, 0, ...]
+        else:
+            raise ValueError(
+                "target must have shape [H,W], [B,H,W], [1,H,W], or [B,1,H,W], "
+                f"got {tuple(arr.shape)}"
+            )
+
+        if arr.ndim != 3:
+            raise ValueError(f"normalized target must be [B,H,W], got {tuple(arr.shape)}")
+
+        if arr.shape[0] == 1 and batch_size > 1:
+            arr = np.repeat(arr, batch_size, axis=0)
+
+        if arr.shape[0] != batch_size:
+            raise ValueError(
+                "target batch size mismatch after normalization: "
+                f"expected {batch_size}, got {arr.shape[0]}"
+            )
+
+        return arr.astype(np.float64, copy=False)
+
+    def _normalize_mask_cases(
+        mask_in: ArrayLike | None,
+        *,
+        batch_size: int,
+        height: int,
+        width: int,
+    ) -> np.ndarray:
+        return _ensure_mask_bhw(
+            mask_in,
+            batch_size=batch_size,
+            height=height,
+            width=width,
+        )
+
+    forecast_arr = _as_numpy(forecast, name="forecast")
+
+    if forecast_arr.ndim == 2:
+        # One deterministic case with one member.
+        forecast_bmhw = forecast_arr[np.newaxis, np.newaxis, ...]
+    elif forecast_arr.ndim == 3:
+        target_arr = _as_numpy(target, name="target")
+
+        # Ensemble single case: forecast [M,H,W], target [H,W] or [1,H,W].
+        if target_arr.ndim == 2 or (target_arr.ndim == 3 and target_arr.shape[0] == 1):
+            forecast_bmhw = forecast_arr[np.newaxis, ...]
+        else:
+            # Deterministic batch: forecast [B,H,W].
+            forecast_bmhw = forecast_arr[:, np.newaxis, ...]
+    elif forecast_arr.ndim == 4:
+        # Ensemble batch: forecast [B,M,H,W].
+        forecast_bmhw = forecast_arr
+    elif forecast_arr.ndim == 5:
+        # Optional channelized ensemble batch: [B,M,1,H,W].
+        if forecast_arr.shape[2] != 1:
+            raise ValueError(
+                "5D forecast must have singleton channel dimension at axis 2, "
+                f"got {tuple(forecast_arr.shape)}"
+            )
+        forecast_bmhw = forecast_arr[:, :, 0, ...]
+    else:
+        raise ValueError(
+            "forecast must have shape [H,W], [M,H,W], [B,H,W], [B,M,H,W], or "
+            f"[B,M,1,H,W], got {tuple(forecast_arr.shape)}"
+        )
+
+    if forecast_bmhw.ndim != 4:
+        raise ValueError(
+            f"normalized forecast must be [B,M,H,W], got {tuple(forecast_bmhw.shape)}"
+        )
+
+    forecast_bmhw = forecast_bmhw.astype(np.float64, copy=False)
+    batch_size, num_members_in, height, width = forecast_bmhw.shape
+
+    target_bhw = _normalize_target_cases(target, batch_size=batch_size)
+    if target_bhw.shape[1:] != (height, width):
+        raise ValueError(
+            "forecast/target spatial shape mismatch after normalization: "
+            f"forecast={(height, width)}, target={tuple(target_bhw.shape[1:])}"
+        )
+
+    mask_bhw = _normalize_mask_cases(
+        mask,
+        batch_size=batch_size,
+        height=height,
+        width=width,
+    )
 
     per_case: list[PSDCaseResult] = []
     forecast_psd_list: list[np.ndarray] = []
     target_psd_list: list[np.ndarray] = []
-    wavelength_ref: np.ndarray | None = None
+    forecast_member_psd_list: list[np.ndarray] = []
+    wavelength_list: list[np.ndarray] = []
 
-    for b in range(forecast_bhw.shape[0]):
-        f = _apply_mask_fill(forecast_bhw[b], mask_bhw[b])
-        t = _apply_mask_fill(target_bhw[b], mask_bhw[b])
-
-        k_f, psd_f = _radial_psd(f, dx_km=dx_km)
-        k_t, psd_t = _radial_psd(t, dx_km=dx_km)
-        if k_f.size == 0 or k_t.size == 0:
+    for b in range(batch_size):
+        target_field = _apply_mask_fill(target_bhw[b], mask_bhw[b])
+        k_t, psd_t = _radial_psd(target_field, dx_km=dx_km)
+        if k_t.size == 0:
             per_case.append(
                 PSDCaseResult(
                     wavelengths_km=[],
                     forecast_psd=[],
                     target_psd=[],
+                    forecast_member_psd=[],
+                    num_members=int(num_members_in),
                     num_points=0,
                 )
             )
             continue
 
-        # Align by truncating to the common minimum length. This is robust for equal-size fields.
-        n = min(k_f.size, k_t.size)
-        wavelength = _wavenumber_to_wavelength_km(k_f[:n])
-        forecast_vals = psd_f[:n]
-        target_vals = psd_t[:n]
+        member_curves: list[np.ndarray] = []
+        member_wavelength_ref: np.ndarray | None = None
+        target_curve_ref: np.ndarray | None = None
+
+        for m in range(num_members_in):
+            forecast_field = _apply_mask_fill(forecast_bmhw[b, m], mask_bhw[b])
+            k_f, psd_f = _radial_psd(forecast_field, dx_km=dx_km)
+            if k_f.size == 0:
+                continue
+
+            n = min(k_f.size, k_t.size)
+            if n == 0:
+                continue
+
+            wavelength = _wavenumber_to_wavelength_km(k_f[:n])
+            forecast_vals = psd_f[:n]
+            target_vals = psd_t[:n]
+
+            mask_valid = (
+                np.isfinite(wavelength)
+                & np.isfinite(forecast_vals)
+                & np.isfinite(target_vals)
+                & (wavelength > 0.0)
+                & (forecast_vals > 0.0)
+                & (target_vals > 0.0)
+            )
+            if not np.any(mask_valid):
+                continue
+
+            wavelength = wavelength[mask_valid]
+            forecast_vals = forecast_vals[mask_valid]
+            target_vals = target_vals[mask_valid]
+
+            if member_wavelength_ref is None:
+                member_wavelength_ref = wavelength
+                target_curve_ref = target_vals
+                member_curves.append(forecast_vals)
+            else:
+                n_common = min(
+                    member_wavelength_ref.size,
+                    wavelength.size,
+                    target_curve_ref.size if target_curve_ref is not None else wavelength.size,
+                )
+                if n_common == 0:
+                    continue
+
+                member_wavelength_ref = member_wavelength_ref[:n_common]
+                if target_curve_ref is not None:
+                    target_curve_ref = target_curve_ref[:n_common]
+                member_curves = [curve[:n_common] for curve in member_curves]
+                member_curves.append(forecast_vals[:n_common])
+
+        if member_wavelength_ref is None or target_curve_ref is None or len(member_curves) == 0:
+            per_case.append(
+                PSDCaseResult(
+                    wavelengths_km=[],
+                    forecast_psd=[],
+                    target_psd=[],
+                    forecast_member_psd=[],
+                    num_members=0,
+                    num_points=0,
+                )
+            )
+            continue
+
+        member_psd = np.stack(member_curves, axis=0)
+        forecast_mean = np.mean(member_psd, axis=0)
 
         per_case.append(
             PSDCaseResult(
-                wavelengths_km=wavelength.astype(float).tolist(),
-                forecast_psd=forecast_vals.astype(float).tolist(),
-                target_psd=target_vals.astype(float).tolist(),
-                num_points=int(n),
+                wavelengths_km=member_wavelength_ref.astype(float).tolist(),
+                forecast_psd=forecast_mean.astype(float).tolist(),
+                target_psd=target_curve_ref.astype(float).tolist(),
+                forecast_member_psd=member_psd.astype(float).tolist(),
+                num_members=int(member_psd.shape[0]),
+                num_points=int(member_psd.shape[1]),
             )
         )
 
-        if wavelength_ref is None:
-            wavelength_ref = wavelength
-        forecast_psd_list.append(forecast_vals)
-        target_psd_list.append(target_vals)
+        wavelength_list.append(member_wavelength_ref)
+        forecast_psd_list.append(forecast_mean)
+        target_psd_list.append(target_curve_ref)
+        forecast_member_psd_list.append(member_psd)
 
-    if wavelength_ref is None or len(forecast_psd_list) == 0:
+    if len(forecast_psd_list) == 0:
         return PSDResult(
             per_case=per_case,
             mean_wavelengths_km=[],
             mean_forecast_psd=[],
             mean_target_psd=[],
-            num_cases=forecast_bhw.shape[0],
+            mean_forecast_member_psd=[],
+            num_members=0,
+            num_cases=batch_size,
         )
 
-    min_len = min(arr.size for arr in forecast_psd_list + target_psd_list)
-    mean_wavelength = wavelength_ref[:min_len]
+    min_len = min(arr.size for arr in wavelength_list + forecast_psd_list + target_psd_list)
+    mean_wavelength = np.mean(
+        np.stack([arr[:min_len] for arr in wavelength_list], axis=0),
+        axis=0,
+    )
     mean_forecast = np.mean(
-        np.stack([arr[:min_len] for arr in forecast_psd_list], axis=0), axis=0
+        np.stack([arr[:min_len] for arr in forecast_psd_list], axis=0),
+        axis=0,
     )
     mean_target = np.mean(
-        np.stack([arr[:min_len] for arr in target_psd_list], axis=0), axis=0
+        np.stack([arr[:min_len] for arr in target_psd_list], axis=0),
+        axis=0,
     )
+
+    member_counts = [arr.shape[0] for arr in forecast_member_psd_list]
+    common_num_members = min(member_counts) if len(member_counts) > 0 else 0
+    if common_num_members > 0:
+        mean_member_psd = np.mean(
+            np.stack(
+                [arr[:common_num_members, :min_len] for arr in forecast_member_psd_list],
+                axis=0,
+            ),
+            axis=0,
+        )
+        mean_member_psd_out = mean_member_psd.astype(float).tolist()
+    else:
+        mean_member_psd_out = []
 
     return PSDResult(
         per_case=per_case,
         mean_wavelengths_km=mean_wavelength.astype(float).tolist(),
         mean_forecast_psd=mean_forecast.astype(float).tolist(),
         mean_target_psd=mean_target.astype(float).tolist(),
-        num_cases=forecast_bhw.shape[0],
+        mean_forecast_member_psd=mean_member_psd_out,
+        num_members=int(common_num_members),
+        num_cases=batch_size,
     )
 
 
