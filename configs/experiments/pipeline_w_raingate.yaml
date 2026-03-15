@@ -4,8 +4,8 @@ experiment:
   seed: 42
 
 stages:
-  training: true
-  generation: true
+  training: false
+  generation: false
   evaluation: true
 
 bases:
@@ -39,7 +39,7 @@ data:
   overrides: {}
 
 training:
-  run_name: train_edm_small
+  run_name: train_w_raingate
   
 model:
   overrides: 
@@ -60,14 +60,14 @@ model:
 
 
 generation:
-  run_name: generate_test_best
+  run_name: generate_w_raingate
   overrides:
     generation_run:
       data:
         split: test
 
 evaluation:
-  run_name: evaluate_test_best
+  run_name: evaluate_w_raingate
   overrides:
     evaluation_run:
       data:
