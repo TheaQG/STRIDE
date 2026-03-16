@@ -69,7 +69,49 @@ def build_precip_cmap() -> mcolors.Colormap:
     return cmap
 
 
+
 STRIDE_PRECIP_CMAP = build_precip_cmap()
+
+
+PRESSURE_LEVELS = (500, 700, 850, 950, 1000)
+
+
+def _build_norcp_pressure_level_specs() -> dict[str, VariablePlotSpec]:
+    """
+    Add plotting specs for NorCP pressure-level variables.
+    """
+    specs: dict[str, VariablePlotSpec] = {}
+
+    for level in PRESSURE_LEVELS:
+        level_str = str(level)
+
+        specs[f"hus{level_str}"] = VariablePlotSpec(
+            cmap="viridis",
+            label=f"Specific humidity @ {level_str} hPa",
+            unit="1",
+        )
+        specs[f"ta{level_str}"] = VariablePlotSpec(
+            cmap="plasma",
+            label=f"Air temperature @ {level_str} hPa",
+            unit="°C",
+        )
+        specs[f"ua{level_str}"] = VariablePlotSpec(
+            cmap="coolwarm",
+            label=f"Eastward wind @ {level_str} hPa",
+            unit="m s⁻¹",
+        )
+        specs[f"va{level_str}"] = VariablePlotSpec(
+            cmap="coolwarm",
+            label=f"Northward wind @ {level_str} hPa",
+            unit="m s⁻¹",
+        )
+        specs[f"zg{level_str}"] = VariablePlotSpec(
+            cmap="cividis",
+            label=f"Geopotential height @ {level_str} hPa",
+            unit="m",
+        )
+
+    return specs
 
 
 _DEFAULT_SPECS: dict[str, VariablePlotSpec] = {
@@ -203,6 +245,8 @@ _DEFAULT_SPECS: dict[str, VariablePlotSpec] = {
     ),
 }
 
+_DEFAULT_SPECS.update(_build_norcp_pressure_level_specs())
+
 
 _DEFAULT_FALLBACK = VariablePlotSpec(
     cmap="viridis",
@@ -227,6 +271,31 @@ _ALIAS_MAP: dict[str, str] = {
     "z_pl1000": "z_pl_1000",
     "thetae_850": "theta_e_850",
     "the_e_850": "theta_e_850",
+    "hus500": "hus500",
+    "hus700": "hus700",
+    "hus850": "hus850",
+    "hus950": "hus950",
+    "hus1000": "hus1000",
+    "ta500": "ta500",
+    "ta700": "ta700",
+    "ta850": "ta850",
+    "ta950": "ta950",
+    "ta1000": "ta1000",
+    "ua500": "ua500",
+    "ua700": "ua700",
+    "ua850": "ua850",
+    "ua950": "ua950",
+    "ua1000": "ua1000",
+    "va500": "va500",
+    "va700": "va700",
+    "va850": "va850",
+    "va950": "va950",
+    "va1000": "va1000",
+    "zg500": "zg500",
+    "zg700": "zg700",
+    "zg850": "zg850",
+    "zg950": "zg950",
+    "zg1000": "zg1000",
 }
 
 

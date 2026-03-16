@@ -66,6 +66,8 @@ DEFAULT_ROOT_DIR = Path("/Users/au728490/Data/Data_DiffMod_small")
 DEFAULT_SIZE_TAG = "size_589x789"
 DEFAULT_DYNAMIC_VARIABLES = ("prcp", "temp")
 DEFAULT_STATIC_VARIABLES = ("lsm", "topo")
+DEFAULT_TARGET_TIME_OFFSETS: dict[str, float] = {}
+DEFAULT_DYNAMIC_TIME_OFFSETS: dict[str, float] = {}
 
 
 @dataclass(frozen=True)
@@ -76,6 +78,10 @@ class AdapterConfig:
 
     root_dir: str | Path = DEFAULT_ROOT_DIR
     size_tag: str = DEFAULT_SIZE_TAG
+    scenario_name: str | None = None
+    temporal_tag: str | None = None
+    target_spatial_tag: str | None = None
+    dynamic_spatial_tag: str | None = None
     split_manifest_path: str | Path = (
         Path("data_adapters/danra_era5_small/saved/splits/random_seed42.json")
     )
@@ -86,13 +92,21 @@ class AdapterConfig:
     target_source: str = "DANRA"
     dynamic_variables: tuple[str, ...] = DEFAULT_DYNAMIC_VARIABLES
     dynamic_source: str = "ERA5"
+    target_time_offsets: dict[str, float] = None  # type: ignore[assignment]
+    dynamic_time_offsets: dict[str, float] = None  # type: ignore[assignment]
     static_variables: tuple[str, ...] = DEFAULT_STATIC_VARIABLES
     static_source: str = "STATIC"
+    static_allow_missing: bool = True
     apply_transforms: bool = True
     split_stats_tag: str | None = None
+    target_full_shape: tuple[int, int] | None = None
+    dynamic_full_shape: tuple[int, int] | None = None
+    upsample_to_target: bool = False
+    upsample_mode: str = "bilinear"
     spatial_shuffle_enabled: bool = False
     spatial_shuffle_train_only: bool = True
     spatial_shuffle_cutout_domain: tuple[int, int, int, int] | None = None
+    spatial_shuffle_seed: int | None = None
 
     @classmethod
     def from_yaml(cls, yaml_path: str | Path) -> "AdapterConfig":
@@ -138,6 +152,8 @@ class AdapterConfig:
         transforms_cfg = data_cfg.get("transforms", {})
         crop_cfg = domain_cfg.get("crop")
         spatial_shuffle_cfg = domain_cfg.get("spatial_shuffle", {})
+        target_full_shape_cfg = domain_cfg.get("target_full_shape")
+        dynamic_full_shape_cfg = domain_cfg.get("dynamic_full_shape")
 
         dynamic_cfg: dict[str, Any]
         static_cfg: dict[str, Any]
@@ -184,6 +200,25 @@ class AdapterConfig:
                 "Expected 'data.domain.spatial_shuffle' to be a dict"
             )
 
+        def _parse_shape(
+            raw: Any,
+            *,
+            field_name: str,
+        ) -> tuple[int, int] | None:
+            if raw is None:
+                return None
+            if isinstance(raw, dict):
+                if "height" not in raw or "width" not in raw:
+                    raise ValueError(
+                        f"Expected '{field_name}' dict to contain keys 'height' and 'width'"
+                    )
+                return (int(raw["height"]), int(raw["width"]))
+            if isinstance(raw, (list, tuple)) and len(raw) == 2:
+                return (int(raw[0]), int(raw[1]))
+            raise ValueError(
+                f"Expected '{field_name}' to be null, a dict with height/width, or a list/tuple of length 2"
+            )
+
         manifest_path = split_cfg.get("manifest_path")
         if manifest_path is None:
             raise KeyError("Missing required key 'data.split.manifest_path'")
@@ -197,9 +232,15 @@ class AdapterConfig:
         if crop_cfg is None:
             crop_tuple = None
         else:
+            anchor_y = crop_cfg.get("anchor_y", crop_cfg.get("top"))
+            anchor_x = crop_cfg.get("anchor_x", crop_cfg.get("left"))
+            if anchor_y is None or anchor_x is None:
+                raise ValueError(
+                    "Expected 'data.domain.crop' to define either anchor_y/anchor_x or top/left"
+                )
             crop_tuple = (
-                int(crop_cfg["anchor_y"]),
-                int(crop_cfg["anchor_x"]),
+                int(anchor_y),
+                int(anchor_x),
                 int(crop_cfg["height"]),
                 int(crop_cfg["width"]),
             )
@@ -226,9 +267,38 @@ class AdapterConfig:
                 int(cutout_domain_raw[3]),
             )
 
+        target_full_shape = _parse_shape(
+            target_full_shape_cfg,
+            field_name="data.domain.target_full_shape",
+        )
+        dynamic_full_shape = _parse_shape(
+            dynamic_full_shape_cfg,
+            field_name="data.domain.dynamic_full_shape",
+        )
+
         return cls(
             root_dir=data_cfg.get("root_dir", DEFAULT_ROOT_DIR),
             size_tag=data_cfg.get("size_tag", DEFAULT_SIZE_TAG),
+            scenario_name=(
+                None
+                if data_cfg.get("scenario_name") is None
+                else str(data_cfg.get("scenario_name"))
+            ),
+            temporal_tag=(
+                None
+                if data_cfg.get("temporal_tag") is None
+                else str(data_cfg.get("temporal_tag"))
+            ),
+            target_spatial_tag=(
+                None
+                if data_cfg.get("target_spatial_tag") is None
+                else str(data_cfg.get("target_spatial_tag"))
+            ),
+            dynamic_spatial_tag=(
+                None
+                if data_cfg.get("dynamic_spatial_tag") is None
+                else str(data_cfg.get("dynamic_spatial_tag"))
+            ),
             split_manifest_path=manifest_path_resolved,
             split_name=str(split_cfg.get("name", "train")),
             domain_tag=str(domain_cfg.get("tag", "dk_128x128")),
@@ -240,22 +310,38 @@ class AdapterConfig:
                 spatial_shuffle_cfg.get("train_only", True)
             ),
             spatial_shuffle_cutout_domain=spatial_shuffle_cutout_domain,
+            spatial_shuffle_seed=(
+                None
+                if spatial_shuffle_cfg.get("seed") is None
+                else int(spatial_shuffle_cfg.get("seed")) # type: ignore
+            ),
             target_variable=str(target_cfg.get("variable", "prcp")),
             target_source=str(target_cfg.get("source", "DANRA")),
             dynamic_variables=tuple(
                 dynamic_cfg.get("variables", DEFAULT_DYNAMIC_VARIABLES)
             ),
             dynamic_source=str(dynamic_cfg.get("source", "ERA5")),
+            target_time_offsets=dict(
+                target_cfg.get("time_offsets", DEFAULT_TARGET_TIME_OFFSETS)
+            ),
+            dynamic_time_offsets=dict(
+                dynamic_cfg.get("time_offsets", DEFAULT_DYNAMIC_TIME_OFFSETS)
+            ),
             static_variables=tuple(
                 static_cfg.get("variables", DEFAULT_STATIC_VARIABLES)
             ),
             static_source=str(static_cfg.get("source", "STATIC")),
+            static_allow_missing=bool(static_cfg.get("allow_missing", True)),
             apply_transforms=bool(transforms_cfg.get("apply", True)),
             split_stats_tag=(
                 str(split_cfg["stats_tag"])
                 if split_cfg.get("stats_tag") is not None
                 else None
             ),
+            target_full_shape=target_full_shape,
+            dynamic_full_shape=dynamic_full_shape,
+            upsample_to_target=bool(dynamic_cfg.get("upsample_to_target", False)),
+            upsample_mode=str(dynamic_cfg.get("upsample_mode", "bilinear")),
         )
 
     @staticmethod
@@ -331,3 +417,17 @@ class AdapterConfig:
         Whether spatial shuffling is enabled in the adapter config.
         """
         return self.spatial_shuffle_enabled
+
+    @property
+    def spatial_shuffle(self) -> bool:
+        """
+        Backward-compatible alias used by some adapters.
+        """
+        return self.spatial_shuffle_enabled
+
+    @property
+    def shuffle_seed(self) -> int | None:
+        """
+        Backward-compatible alias used by some adapters.
+        """
+        return self.spatial_shuffle_seed
