@@ -1,0 +1,50 @@
+{
+  "crop": null,
+  "domain_tag": "full_domain",
+  "metadata": {
+    "backend": "cdo",
+    "cdo_executable": "/opt/homebrew/bin/cdo",
+    "launcher": "data_adapters.norcp.launch_statistics",
+    "selection": {
+      "crop": null,
+      "input_files": [
+        "/Users/au728490/Data/NorCP/cropped/ECMWF-ERAINT/3km/fx/orog/orog_3km_fx.nc"
+      ],
+      "raw_end_time": null,
+      "raw_start_time": null,
+      "reduced_file": "/var/folders/nj/qv09n8sx0tsfmf6z0ktk_pwjx80ybt/T/norcp_stats_cdo_kjq8wbil/reduced_subset.nc",
+      "selected_variable": "orog"
+    },
+    "split_manifest_tag": "temporal__ECMWF-ERAINT__train_auto_auto__val_2010-01-01T00-00-00_2012-12-31T18-00-00__test_2013-01-01T00-00-00_2018-12-31T18-00-00",
+    "variable_time_offset_hours": 0.0
+  },
+  "physical_summary": {
+    "max": 345.8423156738281,
+    "mean": 133.00331115722656,
+    "min": 1.6769760847091675,
+    "n_samples": 1,
+    "n_values": 6256,
+    "std": 79.13603973388672
+  },
+  "sample_count": 1,
+  "scenario_name": "ECMWF-ERAINT",
+  "source": "NORCP_STATIC",
+  "spatial_tag": "3km",
+  "split_manifest_path": "/Users/au728490/Code/STRIDE/data_adapters/norcp/saved/splits/temporal__ECMWF-ERAINT__train_auto_auto__val_2010-01-01T00-00-00_2012-12-31T18-00-00__test_2013-01-01T00-00-00_2018-12-31T18-00-00.json",
+  "split_name": "train",
+  "temporal_tag": null,
+  "timestamps_used": [
+    "static"
+  ],
+  "transform_name": "zscore",
+  "transform_stats": {
+    "max": 345.8423156738281,
+    "mean": 133.00331115722656,
+    "median": 117.37802124023438,
+    "min": 1.6769760847091675,
+    "p25": 63.984389305114746,
+    "p75": 195.32589721679688,
+    "std": 79.13603973388672
+  },
+  "variable": "topo"
+}

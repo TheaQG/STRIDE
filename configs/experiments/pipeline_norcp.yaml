@@ -1,0 +1,82 @@
+experiment:
+  name: pipeline_w_raingate
+  output_root: runs/pipeline_w_raingate
+  seed: 42
+
+stages:
+  training: false
+  generation: false
+  evaluation: true
+
+bases:
+  model: configs/models/edm_small.yaml
+  training: configs/training/training_base.yaml
+  generation: configs/generation/generation_base.yaml
+  evaluation: configs/evaluation/evaluation_base.yaml
+  data: configs/datasets/danra_era5_small.yaml
+
+data:
+  target:
+    variable: prcp
+    transform: log1p
+    output_shape: [128, 128]
+
+  conditioning:
+    dynamic_variables: [prcp, temp]
+    static_variables: [lsm, topo]
+    input_shape: [128, 128]
+
+  domain:
+    hr_size: [128, 128]
+    lr_size: [128, 128]
+    large_domain: false
+
+  split:
+    train: null
+    valid: null
+    test: null
+
+  overrides:
+    domain:
+      spatial_shuffle:
+        enabled: true
+        train_only: true
+        cutout_domain: [170, 350, 340, 520]
+
+training:
+  run_name: train_w_raingate
+  
+model:
+  overrides: 
+    rain_gate:
+      model:
+        enabled: true
+        hidden_channels: 32
+        num_blocks: 3
+        input_mode: "cond"
+      loss:
+        enabled: false
+        loss_weight: 0.1
+        wet_threshold_mm: 0.1
+        target_variable: "prcp"
+        use_loss_reweighting: false
+        reweight_detach: true
+        reweight_power: 1.0
+
+
+generation:
+  run_name: generate_w_raingate
+  overrides:
+    generation_run:
+      data:
+        split: test
+
+evaluation:
+  run_name: evaluate_w_raingate
+  overrides:
+    evaluation_run:
+      data:
+        split: test
+        forecast_product_for_spatial: pmm
+        forecast_product_for_climatology: pmm
+        forecast_product_for_temporal: pmm
