@@ -137,6 +137,8 @@ class NorCPDataset(Dataset):
         self.shuffle_seed = getattr(cfg, "shuffle_seed", None)
         self._rng = np.random.default_rng(self.shuffle_seed)
         self.split_name = getattr(cfg, "split_name", "train")
+        self.statistics_split_map = getattr(cfg, "statistics_split_map", None)
+        self.stats_split_name = self._resolve_stats_split_name()
         self.split_manifest_path = Path(self._get_required_attr("split_manifest_path"))
         self.apply_transforms = bool(getattr(cfg, "apply_transforms", True))
 
@@ -201,6 +203,24 @@ class NorCPDataset(Dataset):
             variables=self.static_variables,
             source=self.static_source,
         )
+
+    def _resolve_stats_split_name(self) -> str:
+        """
+        Resolve which split's statistics should be used for normalization.
+        Dataset split and statistics split are intentionally decoupled:
+        - split_name controls which samples are loaded
+        - stats_split_name controls which saved normalization statistics are used
+
+        Current default policy is to use training statistics for all splits unless
+        an explicit statistics_split_map is provided by the compiled config.
+        """
+        raw_map = self.statistics_split_map
+        if isinstance(raw_map, dict):
+            selected = raw_map.get(self.split_name, None)
+            if selected is not None:
+                return str(selected)
+        return "train"
+
 
     def __len__(self) -> int:
         return len(self.timestamps)
@@ -428,7 +448,7 @@ class NorCPDataset(Dataset):
                 continue
 
             stats_path = build_stats_output_path(
-                split_name=self.split_name,
+                split_name=self.stats_split_name,
                 domain_tag=self.domain_tag,
                 scenario_name=self.scenario_name,
                 variable=variable,
@@ -619,6 +639,7 @@ class NorCPDataset(Dataset):
             "doy_sin_cos": date_meta["doy_sin_cos"],
             "scenario_name": self.scenario_name,
             "split_name": self.split_name,
+            "stats_split_name": self.stats_split_name,            
             "split_manifest_path": str(self.split_manifest_path),
             "domain_tag": self.domain_tag,
             "target_var": self.target_variable,
