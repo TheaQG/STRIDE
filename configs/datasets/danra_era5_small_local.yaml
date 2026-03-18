@@ -1,0 +1,45 @@
+data:
+  root_dir: /Users/au728490/Data/Data_DiffMod_small
+  size_tag: size_589x789
+
+  split:
+    manifest_path: data_adapters/danra_era5_small/saved/splits/random_seed42.json
+    name: train
+    stats_tag: random_seed42
+
+  domain:
+    tag: dk_128x128
+    crop:
+      anchor_y: 200
+      anchor_x: 380
+      height: 128
+      width: 128
+
+    spatial_shuffle:
+      enabled: false
+      train_only: true
+      cutout_domain: [170, 350, 340, 520]   # [x1, x2, y1, y2]
+
+  target:
+    variable: prcp
+    source: DANRA
+
+  conditioning:
+    dynamic:
+      source: ERA5
+      variables: [prcp, temp] # , z500, ewvf, nwvf]
+    static:
+      source: STATIC
+      variables: [lsm, topo]
+
+  transforms:
+    apply: true
+    target:
+      prcp: log_zscore
+    conditioning:
+      dynamic:
+        prcp: log_zscore
+        temp: zscore
+      static:
+        lsm: identity
+        topo: zscore
