@@ -28,7 +28,8 @@ if __package__ is None or __package__ == "":
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
 
-from stride_core.pipeline.experiment_config import ExperimentConfig
+from stride_core.configs.config_compiler import ConfigCompiler
+from stride_core.configs.experiment_config import ExperimentConfig
 from stride_core.pipeline.experiment_runner import ExperimentRunner
 from stride_core.utils.logging_utils import setup_logging
 
@@ -90,6 +91,8 @@ def _launch_summary_lines(cfg: ExperimentConfig) -> list[str]:
         f"Host:             {socket.gethostname()}",
         f"Python:           {sys.executable}",
         f"CWD:              {Path.cwd()}",
+        f"Output root:      {cfg.meta.output_root}",
+        f"Stages:           training={cfg.stages.training}, generation={cfg.stages.generation}, evaluation={cfg.stages.evaluation}",
     ]
 
 
@@ -116,17 +119,31 @@ def _validate_base(name: str, path: Path | None) -> str:
 
 
 def _run_dry_validation(cfg: ExperimentConfig) -> None:
+    compiler = ConfigCompiler(cfg)
+    compiled = compiler.compile()
+
     lines = [
         _format_header("Pipeline dry run"),
         _validate_base("model", _resolve_base_config_path(cfg.bases.model_config_path)),
         _validate_base("training", _resolve_base_config_path(cfg.bases.training_config_path)),
         _validate_base("generation", _resolve_base_config_path(cfg.bases.generation_config_path)),
+        _validate_base("sampler", _resolve_base_config_path(cfg.bases.sampler_config_path)),
         _validate_base("evaluation", _resolve_base_config_path(cfg.bases.evaluation_config_path)),
         _validate_base("data", _resolve_base_config_path(cfg.bases.data_config_path)),
-        f"[training] enabled={cfg.stages.training}",
-        f"[generation] enabled={cfg.stages.generation}",
-        f"[evaluation] enabled={cfg.stages.evaluation}",
-        "\nDry run successful. Experiment config and base config paths were resolved correctly.",
+        "",
+        f"Compiled experiment root: {compiled.experiment_root}",
+        f"Compiled config dir:      {compiled.compiled_config_dir}",
+        f"Compiled model config:    {compiled.model_config_path}",
+        f"Compiled data config:     {compiled.data_config_path}",
+        f"Compiled training config: {compiled.training_run_config_path}",
+        f"Compiled generation cfg:  {compiled.generation_run_config_path}",
+        f"Compiled evaluation cfg:  {compiled.evaluation_run_config_path}",
+        "",
+        _validate_stage("training", cfg.stages.training, compiled.training_run_config_path),
+        _validate_stage("generation", cfg.stages.generation, compiled.generation_run_config_path),
+        _validate_stage("evaluation", cfg.stages.evaluation, compiled.evaluation_run_config_path),
+        "",
+        "Dry run successful. Experiment config compiled and stage configs were resolved correctly.",
     ]
     print("\n".join(lines))
 

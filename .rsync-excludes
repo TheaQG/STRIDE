@@ -1,0 +1,43 @@
+# rsync control
+.rsync-excludes
+
+# git
+.git/
+.gitignore
+
+# python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# environments
+.venv/
+venv/
+env/
+
+# editor/system
+.vscode/
+.idea/
+.DS_Store
+
+# local outputs
+runs/
+logs/
+tmp/
+temp/
+
+# notebook junk
+.ipynb_checkpoints/
+
+# optional: local-only experiment drafts
+configs/experiments/to_be_implemented/
+
+# optional: small local test artifacts
+test_scripts/norcp/full_domain/
+test_scripts/norcp/saved_split_tests/
+
+# doc files for GitHub
+documentations/
