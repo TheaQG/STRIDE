@@ -1,6 +1,6 @@
 training:
   data:
-    batch_size: 4
+    batch_size: 16
     num_workers: 0
     pin_memory: false
     shuffle_train: true
@@ -19,15 +19,15 @@ training:
 
   optimizer:
     name: "adamw"
-    lr: 1.0e-4
-    weight_decay: 1.0e-4
+    lr: 0.0003
+    weight_decay: 0.000001
     betas: [0.9, 0.999]
     eps: 1.0e-8
 
   scheduler:
-    enabled: false
-    name: null
-    params: {}
+    enabled: true
+    name: "ReduceLROnPlateau"
+    params: {"factor": 0.5, "patience": 15, "threshold": 0.01, "min_lr": 1e-6}
 
   ema:
     enabled: true

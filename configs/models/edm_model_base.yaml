@@ -17,7 +17,7 @@ model:
     num_heads: 4
 
   embeddings:
-    sigma_embed_dim: 128
+    sigma_embed_dim: 256
     film_embed_dim: 128
     use_doy_film: true
     use_variable_film: false
@@ -30,12 +30,12 @@ model:
   rain_gate:
     model:
       enabled: false
-      hidden_channels: 32
+      hidden_channels: 16
       num_blocks: 3
       input_mode: "cond"  # "cond" or "predcond"
     loss:
       enabled: false
-      loss_weight: 0.1
+      loss_weight: 0.02
       wet_threshold_mm: 0.1
       target_variable: "prcp"
       use_loss_reweighting: false

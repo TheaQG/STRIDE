@@ -13,7 +13,7 @@ generation:
     shuffle: false # We want to preserve the order of the test set for evaluation purposes
 
   sampling:
-    ensemble_size: 3
+    ensemble_size: 16
     use_fixed_seed: false
     base_seed: 42
 

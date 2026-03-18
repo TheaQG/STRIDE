@@ -1,13 +1,13 @@
 generation:
   sampler:
     name: edm
-    num_steps: 18
+    num_steps: 56
     sigma_min: 0.002
     sigma_max: 80.0
     rho: 7.0
-    S_churn: 0.0
-    S_min: 0.0
-    S_max: inf
+    S_churn: 2.0
+    S_min: 40.0
+    S_max: 80
     S_noise: 1.0
 
   output:

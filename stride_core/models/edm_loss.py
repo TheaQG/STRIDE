@@ -107,9 +107,9 @@ class EDMLoss(nn.Module):
 
     def __init__(
         self,
-        p_mean: float = -1.2,
+        p_mean: float = -1.5,
         p_std: float = 1.2,
-        sigma_data: float = 0.5,
+        sigma_data: float = 1.0,
         reduction: str = "mean",
         rain_gate_cfg: dict[str, Any] | None = None,
         rain_gate_enabled: bool | None = None,

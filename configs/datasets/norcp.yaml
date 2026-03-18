@@ -1,5 +1,5 @@
 data:
-  root_dir: /Users/au728490/Data/NorCP/cropped
+  root_dir: /scratch/project_465002493/quistgaa/Data/NorCP/cropped # /Users/au728490/Data/NorCP/cropped
   scenario_name: ECMWF-ERAINT
   temporal_tag: 6hr
   target_spatial_tag: 3km
