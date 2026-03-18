@@ -7,7 +7,7 @@ generation:
 
   data:
     split: "test"
-    batch_size: 1
+    batch_size: 100
     num_workers: 0
     pin_memory: false
     shuffle: false # We want to preserve the order of the test set for evaluation purposes

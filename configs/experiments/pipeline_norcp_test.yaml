@@ -53,7 +53,7 @@ training:
   run_name: train_norcp
   overrides:
     loop:
-      max_epochs: 50
+      max_epochs: 5
   
 model:
   overrides:
@@ -91,7 +91,7 @@ generation:
     generation_run:
       data:
         split: test
-        batch_size: 50 # set to 50 to speed up generation for testing purposes; can be increased for final runs
+        batch_size: 3 # set to 50 to speed up generation for testing purposes; can be increased for final runs
 
 
 evaluation:
