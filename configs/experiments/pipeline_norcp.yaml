@@ -1,53 +1,71 @@
 experiment:
-  name: pipeline_w_raingate
-  output_root: runs/pipeline_w_raingate
+  name: pipeline_norcp
+  output_root: runs/pipeline_norcp
   seed: 42
 
 stages:
-  training: false
-  generation: false
+  training: true
+  generation: true
   evaluation: true
 
 bases:
-  model: configs/models/edm_small.yaml
+  model: configs/models/edm_model_base.yaml
   training: configs/training/training_base.yaml
   generation: configs/generation/generation_base.yaml
+  sampler: configs/generation/sampler_base.yaml
   evaluation: configs/evaluation/evaluation_base.yaml
-  data: configs/datasets/danra_era5_small.yaml
+  data: configs/datasets/norcp.yaml
 
 data:
   target:
     variable: prcp
     transform: log1p
-    output_shape: [128, 128]
+    output_shape: [92, 68]
 
   conditioning:
     dynamic_variables: [prcp, temp]
-    static_variables: [lsm, topo]
-    input_shape: [128, 128]
+    static_variables: [topo]
+    input_shape: [23, 17]
 
   domain:
-    hr_size: [128, 128]
-    lr_size: [128, 128]
+    hr_size: [92, 68]
+    lr_size: [23, 17]
     large_domain: false
 
   split:
     train: null
-    valid: null
+    val: null
     test: null
+    
+    statistics: # which split to use for computing data statistics (e.g. mean, std) used for normalization; if null, use training split
+      train: train
+      val: train
+      test: train
 
   overrides:
     domain:
       spatial_shuffle:
-        enabled: true
+        enabled: false
         train_only: true
         cutout_domain: [170, 350, 340, 520]
 
 training:
-  run_name: train_w_raingate
+  run_name: train_norcp
   
 model:
-  overrides: 
+  overrides:
+    in_dynamic_channels: 2
+    in_static_channels: 1
+    out_channels: 1
+
+    spatial:
+      target_height: 92
+      target_width: 68
+      cond_height: 23
+      cond_width: 17
+      align_cond_to_target: true
+      cond_upsample_mode: bilinear
+
     rain_gate:
       model:
         enabled: true
@@ -65,14 +83,14 @@ model:
 
 
 generation:
-  run_name: generate_w_raingate
+  run_name: generate_norcp
   overrides:
     generation_run:
       data:
         split: test
 
 evaluation:
-  run_name: evaluate_w_raingate
+  run_name: evaluate_norcp
   overrides:
     evaluation_run:
       data:

@@ -9,9 +9,10 @@ stages:
   evaluation: true
 
 bases:
-  model: configs/models/edm_small.yaml
+  model: configs/models/edm_model_base.yaml
   training: configs/training/training_base.yaml
   generation: configs/generation/generation_base.yaml
+  sampler: configs/generation/sampler_base.yaml
   evaluation: configs/evaluation/evaluation_base.yaml
   data: configs/datasets/danra_era5_small.yaml
 
