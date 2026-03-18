@@ -914,6 +914,38 @@ class ConfigCompiler:
         self._deep_update(config, training_overrides)
 
         training_cfg = config["training"]
+
+        # ------------------------------------------------------------------
+        # Resolve DataLoader workers from environment (HPC-friendly)
+        # ------------------------------------------------------------------
+        data_cfg = training_cfg.setdefault("data", {})
+        raw_workers = data_cfg.get("num_workers", 0)
+
+        try:
+            raw_workers_int = int(raw_workers)
+        except Exception:
+            raw_workers_int = 0
+
+        if raw_workers_int <= 0:
+            import os
+            env_workers = os.environ.get("SLURM_CPUS_PER_TASK")
+            if env_workers is not None:
+                try:
+                    env_workers_int = int(env_workers)
+                    # Leave a couple of CPUs for main process / overhead
+                    resolved_workers = max(1, env_workers_int - 2)
+                except Exception:
+                    resolved_workers = 0
+            else:
+                resolved_workers = 0
+
+            data_cfg["num_workers"] = resolved_workers
+
+        # Enable sensible defaults for HPC
+        if data_cfg.get("num_workers", 0) > 0:
+            data_cfg.setdefault("pin_memory", True)
+            data_cfg.setdefault("persistent_workers", True)
+
         training_cfg.setdefault("run", {})
         training_cfg.setdefault("configs", {})
         training_cfg["run"]["name"] = run_name

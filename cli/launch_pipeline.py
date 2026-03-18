@@ -132,7 +132,7 @@ def _run_dry_validation(cfg: ExperimentConfig) -> None:
         _validate_base("data", _resolve_base_config_path(cfg.bases.data_config_path)),
         "",
         f"Compiled experiment root: {compiled.experiment_root}",
-        f"Compiled config dir:      {compiled.compiled_config_dir}",
+        f"Compiled config dir:      {compiled.compiled_dir}",
         f"Compiled model config:    {compiled.model_config_path}",
         f"Compiled data config:     {compiled.data_config_path}",
         f"Compiled training config: {compiled.training_run_config_path}",
