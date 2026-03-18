@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 
-VALID_SPLIT_NAMES = {"train", "valid", "test"}
+VALID_SPLIT_NAMES = {"train", "val", "test"}
 
 
 def extract_year_from_date(date_str: str) -> int:
@@ -47,7 +47,7 @@ def validate_dates(dates: list[str]) -> None:
 def build_random_split_manifest(
     dates: list[str],
     train_fraction: float,
-    valid_fraction: float,
+    val_fraction: float,
     test_fraction: float,
     seed: int,
     split_name: str = "random_split",
@@ -57,7 +57,7 @@ def build_random_split_manifest(
     """
     validate_dates(dates)
 
-    total_fraction = train_fraction + valid_fraction + test_fraction
+    total_fraction = train_fraction + val_fraction + test_fraction
     if abs(total_fraction - 1.0) > 1e-8:
         raise ValueError(
             f"Split fractions must sum to 1.0, got {total_fraction}"
@@ -69,12 +69,12 @@ def build_random_split_manifest(
 
     n_total = len(shuffled_dates)
     n_train = int(n_total * train_fraction)
-    n_valid = int(n_total * valid_fraction)
-    n_test = n_total - n_train - n_valid
+    n_val = int(n_total * val_fraction)
+    n_test = n_total - n_train - n_val
 
     train_dates = sorted(shuffled_dates[:n_train])
-    valid_dates = sorted(shuffled_dates[n_train:n_train + n_valid])
-    test_dates = sorted(shuffled_dates[n_train + n_valid:])
+    val_dates = sorted(shuffled_dates[n_train:n_train + n_val])
+    test_dates = sorted(shuffled_dates[n_train + n_val:])
 
     manifest = {
         "split_strategy": "random",
@@ -82,16 +82,16 @@ def build_random_split_manifest(
         "seed": seed,
         "fractions": {
             "train": train_fraction,
-            "valid": valid_fraction,
+            "val": val_fraction,
             "test": test_fraction,
         },
         "n_total": n_total,
         "n_train": len(train_dates),
-        "n_valid": len(valid_dates),
+        "n_val": len(val_dates),
         "n_test": len(test_dates),
         "dates": {
             "train": train_dates,
-            "valid": valid_dates,
+            "val": val_dates,
             "test": test_dates,
         },
     }
@@ -114,12 +114,12 @@ def build_year_based_split_manifest(
 
     year_sets = {
         "train": set(train_years),
-        "valid": set(valid_years),
+        "val": set(valid_years),
         "test": set(test_years),
     }
 
     overlaps = []
-    split_names = ["train", "valid", "test"]
+    split_names = ["train", "val", "test"]
     for i, split_a in enumerate(split_names):
         for split_b in split_names[i + 1:]:
             overlap = year_sets[split_a] & year_sets[split_b]
@@ -128,7 +128,7 @@ def build_year_based_split_manifest(
     if overlaps:
         raise ValueError(f"Year-based split sets overlap: {overlaps}")
 
-    split_dates = {"train": [], "valid": [], "test": []}
+    split_dates = {"train": [], "val": [], "test": []}
     unassigned_dates: list[str] = []
 
     for date_str in sorted(dates):
@@ -153,16 +153,16 @@ def build_year_based_split_manifest(
         "split_name": split_name,
         "year_assignment": {
             "train": sorted(train_years),
-            "valid": sorted(valid_years),
+            "val": sorted(valid_years),
             "test": sorted(test_years),
         },
         "n_total": len(dates),
         "n_train": len(split_dates["train"]),
-        "n_valid": len(split_dates["valid"]),
+        "n_val": len(split_dates["val"]),
         "n_test": len(split_dates["test"]),
         "dates": {
             "train": sorted(split_dates["train"]),
-            "valid": sorted(split_dates["valid"]),
+            "val": sorted(split_dates["val"]),
             "test": sorted(split_dates["test"]),
         },
     }
@@ -187,7 +187,7 @@ def validate_split_manifest(
         raise ValueError(f"Manifest missing required splits: {sorted(missing_splits)}")
 
     train_dates = split_dates["train"]
-    valid_dates = split_dates["valid"]
+    val_dates = split_dates["val"]
     test_dates = split_dates["test"]
 
     for subset_name, subset_dates in split_dates.items():
@@ -196,17 +196,17 @@ def validate_split_manifest(
         validate_dates(list(subset_dates))
 
     train_set = set(train_dates)
-    valid_set = set(valid_dates)
+    val_set = set(val_dates)
     test_set = set(test_dates)
 
-    if train_set & valid_set:
-        raise ValueError("Train and valid splits overlap")
+    if train_set & val_set:
+        raise ValueError("Train and val splits overlap")
     if train_set & test_set:
         raise ValueError("Train and test splits overlap")
-    if valid_set & test_set:
-        raise ValueError("Valid and test splits overlap")
+    if val_set & test_set:
+        raise ValueError("Val and test splits overlap")
 
-    union_dates = sorted(train_set | valid_set | test_set)
+    union_dates = sorted(train_set | val_set | test_set)
 
     if expected_all_dates is not None:
         expected_sorted = sorted(expected_all_dates)
@@ -225,8 +225,8 @@ def validate_split_manifest(
         )
     if manifest.get("n_train") != len(train_dates):
         raise ValueError("Manifest n_train does not match actual train count")
-    if manifest.get("n_valid") != len(valid_dates):
-        raise ValueError("Manifest n_valid does not match actual valid count")
+    if manifest.get("n_val") != len(val_dates):
+        raise ValueError("Manifest n_val does not match actual val count")
     if manifest.get("n_test") != len(test_dates):
         raise ValueError("Manifest n_test does not match actual test count")
 

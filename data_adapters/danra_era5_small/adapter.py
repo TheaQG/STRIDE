@@ -446,7 +446,7 @@ class DanraEra5SmallAdapter:
         return DanraEra5SmallDataset(self.cfg)
 
     def build_datasets(self) -> dict[str, DanraEra5SmallDataset]:
-        split_names = ("train", "valid", "test")
+        split_names = ("train", "val", "test")
         datasets: dict[str, DanraEra5SmallDataset] = {}
         for split_name in split_names:
             split_cfg = AdapterConfig(

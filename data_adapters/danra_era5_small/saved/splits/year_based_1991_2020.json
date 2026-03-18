@@ -99,7 +99,7 @@
       "20160122",
       "20160825"
     ],
-    "valid": [
+    "val": [
       "20170208",
       "20170701",
       "20180107",
@@ -110,7 +110,7 @@
   "n_test": 3,
   "n_total": 100,
   "n_train": 92,
-  "n_valid": 5,
+  "n_val": 5,
   "split_name": "year_based_1991_2020",
   "split_strategy": "year_based",
   "year_assignment": {
@@ -146,7 +146,7 @@
       2015,
       2016
     ],
-    "valid": [
+    "val": [
       2017,
       2018
     ]

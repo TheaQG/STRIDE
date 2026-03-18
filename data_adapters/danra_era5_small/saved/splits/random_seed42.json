@@ -89,7 +89,7 @@
       "20200604",
       "20201218"
     ],
-    "valid": [
+    "val": [
       "19910813",
       "19970518",
       "19970917",
@@ -110,12 +110,12 @@
   "fractions": {
     "test": 0.15,
     "train": 0.7,
-    "valid": 0.15
+    "val": 0.15
   },
   "n_test": 15,
   "n_total": 100,
   "n_train": 70,
-  "n_valid": 15,
+  "n_val": 15,
   "seed": 42,
   "split_name": "random_seed42",
   "split_strategy": "random"
