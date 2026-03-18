@@ -25,7 +25,7 @@ if __package__ is None or __package__ == "":
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
 
-from stride_core.pipeline.experiment_config import ExperimentConfig
+from stride_core.configs.experiment_config import ExperimentConfig
 from stride_core.pipeline.experiment_runner import ExperimentRunner
 
 

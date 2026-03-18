@@ -24,8 +24,8 @@ import subprocess
 import sys
 import time
 
-from stride_core.pipeline.experiment_config import ExperimentConfig
-from stride_core.pipeline.config_compiler import ConfigCompiler
+from stride_core.configs.experiment_config import ExperimentConfig
+from stride_core.configs.config_compiler import ConfigCompiler
 
 
 # -----------------------------------------------------------------------------

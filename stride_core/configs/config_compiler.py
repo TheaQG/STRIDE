@@ -31,10 +31,13 @@ from pathlib import Path
 from typing import Any
 import copy
 import json
+import logging
 
 import yaml
 
-from stride_core.pipeline.experiment_config import ExperimentConfig
+from stride_core.configs.experiment_config import ExperimentConfig
+
+logger = logging.getLogger(__name__)
 
 
 # -----------------------------------------------------------------------------
@@ -68,6 +71,7 @@ class ConfigCompiler:
     def __init__(self, cfg: ExperimentConfig):
         self.cfg = cfg
         self.repo_root = self._infer_repo_root()
+        self._logger = logger
 
     # ------------------------------------------------------------------
     # Public API
@@ -77,6 +81,9 @@ class ConfigCompiler:
         experiment_root = self._resolve_experiment_root()
         compiled_dir = experiment_root / "compiled_configs"
         compiled_dir.mkdir(parents=True, exist_ok=True)
+        self._log(f"Compiling experiment '{self.cfg.meta.name}'")
+        self._log(f"Experiment root: {experiment_root}")
+        self._log(f"Compiled config directory: {compiled_dir}")
 
         # ------------------------------------------------------------------
         # Load bases
@@ -85,8 +92,16 @@ class ConfigCompiler:
         base_model = self._load_yaml_file(self.cfg.bases.model_config_path)
         base_training = self._load_yaml_file(self.cfg.bases.training_config_path)
         base_generation = self._load_yaml_file(self.cfg.bases.generation_config_path)
+        base_sampler = self._load_yaml_file(self.cfg.bases.sampler_config_path)
         base_evaluation = self._load_yaml_file(self.cfg.bases.evaluation_config_path)
         base_data = self._load_yaml_file(self.cfg.bases.data_config_path)
+        self._log("Loaded base configs successfully")
+        self._log(f"  model base: {self.cfg.bases.model_config_path}")
+        self._log(f"  training base: {self.cfg.bases.training_config_path}")
+        self._log(f"  generation base: {self.cfg.bases.generation_config_path}")
+        self._log(f"  sampler base: {self.cfg.bases.sampler_config_path}")
+        self._log(f"  evaluation base: {self.cfg.bases.evaluation_config_path}")
+        self._log(f"  data base: {self.cfg.bases.data_config_path}")
 
         # ------------------------------------------------------------------
         # Compile reusable resolved base configs
@@ -95,8 +110,9 @@ class ConfigCompiler:
         resolved_training_base = (
             copy.deepcopy(base_training) if base_training is not None else {}
         )
-        resolved_generation_base = (
-            copy.deepcopy(base_generation) if base_generation is not None else {}
+        resolved_generation_base = self._compile_generation_base_config(
+            base_generation=base_generation,
+            base_sampler=base_sampler,
         )
         resolved_evaluation_base = (
             copy.deepcopy(base_evaluation) if base_evaluation is not None else {}
@@ -109,6 +125,16 @@ class ConfigCompiler:
             base_model,
             resolved_data=resolved_data,
         )
+        self._validate_resolved_data_config(resolved_data)
+        self._validate_data_selection_against_base(
+            base_data=base_data,
+            resolved_data=resolved_data,
+        )
+        self._validate_model_data_alignment(
+            resolved_data=resolved_data,
+            resolved_model=resolved_model,
+        )
+        self._log("Resolved data/model configs passed validation")
 
         model_config_path = self._write_yaml_if_not_none(
             resolved_model,
@@ -120,7 +146,7 @@ class ConfigCompiler:
         )
         generation_base_config_path = self._write_yaml_if_not_none(
             resolved_generation_base,
-            compiled_dir / "generation_base_resolved.yaml",
+            compiled_dir / "generation_resolved.yaml",
         )
         evaluation_base_config_path = self._write_yaml_if_not_none(
             resolved_evaluation_base,
@@ -166,6 +192,13 @@ class ConfigCompiler:
             generation_run_cfg=generation_run_cfg,
             experiment_root=experiment_root,
         )
+        self._validate_stage_run_configs(
+            training_run_cfg=training_run_cfg,
+            generation_run_cfg=generation_run_cfg,
+            evaluation_run_cfg=evaluation_run_cfg,
+        )
+        self._validate_stage_dependencies()
+        self._log("Resolved stage configs passed validation")
         evaluation_run_config_path = self._write_yaml(
             evaluation_run_cfg,
             compiled_dir / "evaluation_run_resolved.yaml",
@@ -291,7 +324,355 @@ class ConfigCompiler:
             target_count,
         )
 
+        hr_size = self._nested_get(
+            resolved_data,
+            ["data", "target", "output_shape"],
+            default=self._nested_get(
+                resolved_data,
+                ["data", "domain", "hr_size"],
+                default=self._nested_get(resolved_data, ["output_shape"], default=None),
+            ),
+        )
+        lr_size = self._nested_get(
+            resolved_data,
+            ["data", "conditioning", "input_shape"],
+            default=self._nested_get(
+                resolved_data,
+                ["data", "domain", "lr_size"],
+                default=self._nested_get(resolved_data, ["input_shape"], default=None),
+            ),
+        )
+
+        hr_hw = self._normalize_shape(hr_size, field_name="resolved_data.hr_size")
+        lr_hw = self._normalize_shape(lr_size, field_name="resolved_data.lr_size")
+
+        if hr_hw is not None:
+            self._set_if_not_none(resolved, ["model", "spatial", "target_height"], hr_hw[0])
+            self._set_if_not_none(resolved, ["model", "spatial", "target_width"], hr_hw[1])
+            self._log(f"Resolved model target spatial size from data: {hr_hw}")
+        if lr_hw is not None:
+            self._set_if_not_none(resolved, ["model", "spatial", "cond_height"], lr_hw[0])
+            self._set_if_not_none(resolved, ["model", "spatial", "cond_width"], lr_hw[1])
+            self._log(f"Resolved model conditioning spatial size from data: {lr_hw}")
+
+        current_align = self._nested_get(
+            resolved,
+            ["model", "spatial", "align_cond_to_target"],
+            default=None,
+        )
+        if hr_hw is not None and lr_hw is not None and hr_hw != lr_hw and current_align is None:
+            self._set_if_not_none(
+                resolved,
+                ["model", "spatial", "align_cond_to_target"],
+                True,
+            )
+            self._warn(
+                "Conditioning and target grids differ; assuming align_cond_to_target=True "
+                f"for model baseline ({lr_hw} -> {hr_hw})."
+            )
+
         return resolved
+
+    def _extract_resolved_interface(
+        self,
+        *,
+        resolved_data: dict[str, Any],
+        resolved_model: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        target_variable = self._nested_get(
+            resolved_data,
+            ["data", "target", "variable"],
+            default=self._nested_get(resolved_data, ["target_variable"], default=None),
+        )
+        dynamic_variables = self._nested_get(
+            resolved_data,
+            ["data", "conditioning", "dynamic", "variables"],
+            default=self._nested_get(resolved_data, ["dynamic_variables"], default=[]),
+        )
+        static_variables = self._nested_get(
+            resolved_data,
+            ["data", "conditioning", "static", "variables"],
+            default=self._nested_get(resolved_data, ["static_variables"], default=[]),
+        )
+        hr_size = self._nested_get(
+            resolved_data,
+            ["data", "target", "output_shape"],
+            default=self._nested_get(
+                resolved_data,
+                ["data", "domain", "hr_size"],
+                default=self._nested_get(resolved_data, ["output_shape"], default=None),
+            ),
+        )
+        lr_size = self._nested_get(
+            resolved_data,
+            ["data", "conditioning", "input_shape"],
+            default=self._nested_get(
+                resolved_data,
+                ["data", "domain", "lr_size"],
+                default=self._nested_get(resolved_data, ["input_shape"], default=None),
+            ),
+        )
+
+        model_target_hw = None
+        model_cond_hw = None
+        model_in_dynamic = None
+        model_in_static = None
+        model_out = None
+        align_cond_to_target = None
+        if resolved_model is not None:
+            model_target_hw = self._normalize_shape(
+                [
+                    self._nested_get(resolved_model, ["model", "spatial", "target_height"], default=None),
+                    self._nested_get(resolved_model, ["model", "spatial", "target_width"], default=None),
+                ],
+                field_name="model.spatial.target_hw",
+                allow_none_pair=True,
+            )
+            model_cond_hw = self._normalize_shape(
+                [
+                    self._nested_get(resolved_model, ["model", "spatial", "cond_height"], default=None),
+                    self._nested_get(resolved_model, ["model", "spatial", "cond_width"], default=None),
+                ],
+                field_name="model.spatial.cond_hw",
+                allow_none_pair=True,
+            )
+            model_in_dynamic = self._nested_get(resolved_model, ["model", "in_dynamic_channels"], default=None)
+            model_in_static = self._nested_get(resolved_model, ["model", "in_static_channels"], default=None)
+            model_out = self._nested_get(resolved_model, ["model", "out_channels"], default=None)
+            align_cond_to_target = self._nested_get(
+                resolved_model,
+                ["model", "spatial", "align_cond_to_target"],
+                default=None,
+            )
+
+        return {
+            "target_variable": target_variable,
+            "dynamic_variables": list(dynamic_variables) if isinstance(dynamic_variables, list) else [],
+            "static_variables": list(static_variables) if isinstance(static_variables, list) else [],
+            "hr_size": self._normalize_shape(hr_size, field_name="resolved_data.hr_size", allow_none_pair=True),
+            "lr_size": self._normalize_shape(lr_size, field_name="resolved_data.lr_size", allow_none_pair=True),
+            "model_target_hw": model_target_hw,
+            "model_cond_hw": model_cond_hw,
+            "model_in_dynamic": model_in_dynamic,
+            "model_in_static": model_in_static,
+            "model_out": model_out,
+            "align_cond_to_target": align_cond_to_target,
+        }
+
+    def _validate_resolved_data_config(
+        self,
+        resolved_data: dict[str, Any],
+    ) -> None:
+        interface = self._extract_resolved_interface(
+            resolved_data=resolved_data,
+            resolved_model=None,
+        )
+        target_variable = interface["target_variable"]
+        dynamic_variables = interface["dynamic_variables"]
+        static_variables = interface["static_variables"]
+        hr_size = interface["hr_size"]
+        lr_size = interface["lr_size"]
+
+        if target_variable is None or str(target_variable).strip() == "":
+            raise ValueError("Resolved data config is missing 'data.target.variable'")
+        if len(dynamic_variables) == 0:
+            self._warn("Resolved data config has zero dynamic conditioning variables")
+        if len(set(dynamic_variables)) != len(dynamic_variables):
+            raise ValueError("Resolved data config contains duplicate dynamic variables")
+        if len(set(static_variables)) != len(static_variables):
+            raise ValueError("Resolved data config contains duplicate static variables")
+        if hr_size is not None and (hr_size[0] <= 0 or hr_size[1] <= 0):
+            raise ValueError(f"Resolved HR size must be positive, got {hr_size}")
+        if lr_size is not None and (lr_size[0] <= 0 or lr_size[1] <= 0):
+            raise ValueError(f"Resolved LR size must be positive, got {lr_size}")
+
+        self._log(f"Resolved target variable: {target_variable}")
+        self._log(f"Resolved dynamic variables ({len(dynamic_variables)}): {dynamic_variables}")
+        self._log(f"Resolved static variables ({len(static_variables)}): {static_variables}")
+        if hr_size is not None:
+            self._log(f"Resolved HR/output size: {hr_size}")
+        if lr_size is not None:
+            self._log(f"Resolved LR/input size: {lr_size}")
+
+    def _validate_data_selection_against_base(
+        self,
+        *,
+        base_data: dict[str, Any] | None,
+        resolved_data: dict[str, Any],
+    ) -> None:
+        if base_data is None:
+            return
+
+        resolved_interface = self._extract_resolved_interface(
+            resolved_data=resolved_data,
+            resolved_model=None,
+        )
+        base_interface = self._extract_resolved_interface(
+            resolved_data=base_data,
+            resolved_model=None,
+        )
+
+        base_target = base_interface["target_variable"]
+        resolved_target = resolved_interface["target_variable"]
+        if base_target is not None and resolved_target is not None and base_target != resolved_target:
+            self._warn(
+                f"Resolved target variable '{resolved_target}' differs from base dataset target '{base_target}'. "
+                "Ensure this dataset truly supports target override for the selected variable."
+            )
+
+        base_dynamic = set(base_interface["dynamic_variables"])
+        resolved_dynamic = set(resolved_interface["dynamic_variables"])
+        if len(base_dynamic) > 0 and not resolved_dynamic.issubset(base_dynamic):
+            missing = sorted(resolved_dynamic.difference(base_dynamic))
+            raise ValueError(
+                "Resolved dynamic variable selection is not a subset of the base dataset config: "
+                f"{missing}"
+            )
+
+        base_static = set(base_interface["static_variables"])
+        resolved_static = set(resolved_interface["static_variables"])
+        if len(base_static) > 0 and not resolved_static.issubset(base_static):
+            missing = sorted(resolved_static.difference(base_static))
+            raise ValueError(
+                "Resolved static variable selection is not a subset of the base dataset config: "
+                f"{missing}"
+            )
+
+        self._log("Resolved data selections are compatible with the base dataset config")
+
+    def _validate_model_data_alignment(
+        self,
+        *,
+        resolved_data: dict[str, Any],
+        resolved_model: dict[str, Any] | None,
+    ) -> None:
+        if resolved_model is None:
+            self._warn("No resolved model config available; skipping model/data alignment checks")
+            return
+
+        interface = self._extract_resolved_interface(
+            resolved_data=resolved_data,
+            resolved_model=resolved_model,
+        )
+
+        dynamic_count = len(interface["dynamic_variables"])
+        static_count = len(interface["static_variables"])
+        target_count = 1 if interface["target_variable"] is not None else 1
+
+        if interface["model_in_dynamic"] != dynamic_count:
+            raise ValueError(
+                "Resolved model/data mismatch: "
+                f"model.in_dynamic_channels={interface['model_in_dynamic']} but "
+                f"resolved data selects {dynamic_count} dynamic variables"
+            )
+        if interface["model_in_static"] != static_count:
+            raise ValueError(
+                "Resolved model/data mismatch: "
+                f"model.in_static_channels={interface['model_in_static']} but "
+                f"resolved data selects {static_count} static variables"
+            )
+        if interface["model_out"] != target_count:
+            raise ValueError(
+                "Resolved model/data mismatch: "
+                f"model.out_channels={interface['model_out']} but target count resolves to {target_count}"
+            )
+        if interface["hr_size"] is not None and interface["model_target_hw"] != interface["hr_size"]:
+            raise ValueError(
+                "Resolved model/data mismatch: "
+                f"model target size {interface['model_target_hw']} vs resolved HR size {interface['hr_size']}"
+            )
+        if interface["lr_size"] is not None and interface["model_cond_hw"] != interface["lr_size"]:
+            raise ValueError(
+                "Resolved model/data mismatch: "
+                f"model conditioning size {interface['model_cond_hw']} vs resolved LR size {interface['lr_size']}"
+            )
+        if (
+            interface["hr_size"] is not None
+            and interface["lr_size"] is not None
+            and interface["hr_size"] != interface["lr_size"]
+            and interface["align_cond_to_target"] is not True
+        ):
+            raise ValueError(
+                "Resolved model/data mismatch: target and conditioning grids differ "
+                f"({interface['lr_size']} -> {interface['hr_size']}) but "
+                "model.spatial.align_cond_to_target is not True"
+            )
+
+        self._log("Resolved model/data interface is aligned")
+
+    def _validate_stage_run_configs(
+        self,
+        *,
+        training_run_cfg: dict[str, Any],
+        generation_run_cfg: dict[str, Any],
+        evaluation_run_cfg: dict[str, Any],
+    ) -> None:
+        training_paths = self._nested_get(training_run_cfg, ["training", "configs"], default={})
+        generation_paths = self._nested_get(generation_run_cfg, ["generation_run", "paths"], default={})
+        evaluation_paths = self._nested_get(evaluation_run_cfg, ["evaluation_run", "paths"], default={})
+
+        if not self._nested_get(training_run_cfg, ["training", "run", "name"], default=None):
+            raise ValueError("Resolved training run config is missing training.run.name")
+        if not training_paths.get("model_config"):
+            raise ValueError("Resolved training run config is missing training.configs.model_config")
+        if not training_paths.get("dataset_config"):
+            raise ValueError("Resolved training run config is missing training.configs.dataset_config")
+        if not generation_paths.get("model_config"):
+            raise ValueError("Resolved generation run config is missing generation_run.paths.model_config")
+        if not generation_paths.get("dataset_config"):
+            raise ValueError("Resolved generation run config is missing generation_run.paths.dataset_config")
+        if not generation_paths.get("checkpoint_path"):
+            raise ValueError("Resolved generation run config is missing generation_run.paths.checkpoint_path")
+        if not evaluation_paths.get("generation_output_dir"):
+            raise ValueError("Resolved evaluation run config is missing evaluation_run.paths.generation_output_dir")
+        if not evaluation_paths.get("dataset_config"):
+            raise ValueError("Resolved evaluation run config is missing evaluation_run.paths.dataset_config")
+
+        self._log("Resolved stage run configs contain the required paths")
+
+    def _validate_stage_dependencies(self) -> None:
+        stages = self.cfg.stages
+        if not stages.training and not stages.generation and not stages.evaluation:
+            raise ValueError("Experiment enables no stages; at least one of training/generation/evaluation must be True")
+        if stages.generation and not stages.training:
+            self._warn(
+                "Generation stage is enabled while training stage is disabled. "
+                "Ensure the compiled checkpoint path points to an existing trained model."
+            )
+        if stages.evaluation and not stages.generation:
+            self._warn(
+                "Evaluation stage is enabled while generation stage is disabled. "
+                "Ensure the expected generation outputs already exist."
+            )
+        self._log(
+            f"Stage selection looks valid: training={stages.training}, "
+            f"generation={stages.generation}, evaluation={stages.evaluation}"
+        )
+
+    def _normalize_shape(
+        self,
+        raw: Any,
+        *,
+        field_name: str,
+        allow_none_pair: bool = False,
+    ) -> tuple[int, int] | None:
+        if raw is None:
+            return None
+        if isinstance(raw, (list, tuple)):
+            if len(raw) != 2:
+                raise ValueError(f"Expected {field_name} to have length 2, got {raw}")
+            if allow_none_pair and raw[0] is None and raw[1] is None:
+                return None
+            if raw[0] is None or raw[1] is None:
+                raise ValueError(f"Expected {field_name} to be fully specified, got {raw}")
+            return (int(raw[0]), int(raw[1]))
+        raise ValueError(f"Expected {field_name} to be a list/tuple of length 2, got {type(raw)}")
+
+    def _log(self, message: str) -> None:
+        self._logger.info(message)
+
+    def _warn(self, message: str) -> None:
+        self._logger.warning(message)
 
     # ------------------------------------------------------------------
     # Data compilation
@@ -346,8 +727,13 @@ class ConfigCompiler:
             },
             "split": {
                 "train": self.cfg.data.split.train,
-                "valid": self.cfg.data.split.valid,
+                "val": self.cfg.data.split.val,
                 "test": self.cfg.data.split.test,
+                "statistics": {
+                    "train": self.cfg.data.split.statistics.train,
+                    "val": self.cfg.data.split.statistics.val,
+                    "test": self.cfg.data.split.statistics.test,
+                },
             },
         }
 
@@ -371,6 +757,36 @@ class ConfigCompiler:
             ["data", "conditioning", "static", "variables"],
             self.cfg.data.conditioning.static_variables,
         )
+        self._set_if_not_none(
+            resolved,
+            ["data", "split", "train"],
+            self.cfg.data.split.train,
+        )
+        self._set_if_not_none(
+            resolved,
+            ["data", "split", "val"],
+            self.cfg.data.split.val,
+        )
+        self._set_if_not_none(
+            resolved,
+            ["data", "split", "test"],
+            self.cfg.data.split.test,
+        )
+        self._set_if_not_none(
+            resolved,
+            ["data", "split", "statistics", "train"],
+            self.cfg.data.split.statistics.train,
+        )
+        self._set_if_not_none(
+            resolved,
+            ["data", "split", "statistics", "val"],
+            self.cfg.data.split.statistics.val,
+        )
+        self._set_if_not_none(
+            resolved,
+            ["data", "split", "statistics", "test"],
+            self.cfg.data.split.statistics.test,
+        )
 
         # Keep a few generic convenience fields for downstream consumers that
         # may still read them directly.
@@ -388,6 +804,18 @@ class ConfigCompiler:
         )
         self._set_if_not_none(resolved, ["hr_size"], self.cfg.data.domain.hr_size)
         self._set_if_not_none(resolved, ["lr_size"], self.cfg.data.domain.lr_size)
+        self._set_if_not_none(resolved, ["split_train"], self.cfg.data.split.train)
+        self._set_if_not_none(resolved, ["split_val"], self.cfg.data.split.val)
+        self._set_if_not_none(resolved, ["split_test"], self.cfg.data.split.test)
+        self._set_if_not_none(
+            resolved,
+            ["statistics_split_map"],
+            {
+                "train": self.cfg.data.split.statistics.train,
+                "val": self.cfg.data.split.statistics.val,
+                "test": self.cfg.data.split.statistics.test,
+            },
+        )
         self._set_if_not_none(
             resolved,
             ["large_domain"],
@@ -579,7 +1007,7 @@ class ConfigCompiler:
     ) -> dict[str, Any]:
         run_name = self.cfg.evaluation.run_name or f"evaluate_{self.cfg.meta.name}"
 
-        generation_output_dir = self._nested_get(
+        default_generation_output_dir = self._nested_get(
             generation_run_cfg,
             ["generation_run", "outputs", "output_dir"],
             default=str(experiment_root / "generation"),
@@ -589,7 +1017,7 @@ class ConfigCompiler:
             "evaluation_run": {
                 "run_name": run_name,
                 "paths": {
-                    "generation_output_dir": generation_output_dir,
+                    "generation_output_dir": default_generation_output_dir,
                     "dataset_config": str(data_config_path) if data_config_path is not None else None,
                     "evaluation_config": (
                         str(evaluation_base_config_path)
@@ -620,17 +1048,25 @@ class ConfigCompiler:
         run_cfg.setdefault("paths", {})
         run_cfg.setdefault("data", {})
         run_cfg.setdefault("outputs", {})
-        run_cfg["paths"]["generation_output_dir"] = str((experiment_root / "generation").resolve())
-        run_cfg["paths"]["dataset_config"] = (
-            str(data_config_path.resolve()) if data_config_path is not None else None
-        )
-        run_cfg["paths"]["evaluation_config"] = (
-            str(evaluation_base_config_path.resolve())
-            if evaluation_base_config_path is not None
-            else None
-        )
-        run_cfg["paths"]["training_config"] = str(training_run_config_path.resolve())
-        run_cfg["outputs"]["output_dir"] = str((experiment_root / "evaluation").resolve())
+
+        if not run_cfg["paths"].get("generation_output_dir"):
+            run_cfg["paths"]["generation_output_dir"] = str(
+                Path(default_generation_output_dir).resolve()
+            )
+        if not run_cfg["paths"].get("dataset_config"):
+            run_cfg["paths"]["dataset_config"] = (
+                str(data_config_path.resolve()) if data_config_path is not None else None
+            )
+        if not run_cfg["paths"].get("evaluation_config"):
+            run_cfg["paths"]["evaluation_config"] = (
+                str(evaluation_base_config_path.resolve())
+                if evaluation_base_config_path is not None
+                else None
+            )
+        if not run_cfg["paths"].get("training_config"):
+            run_cfg["paths"]["training_config"] = str(training_run_config_path.resolve())
+        if not run_cfg["outputs"].get("output_dir"):
+            run_cfg["outputs"]["output_dir"] = str((experiment_root / "evaluation").resolve())
         return config
 
     # ------------------------------------------------------------------
@@ -726,3 +1162,55 @@ class ConfigCompiler:
         if isinstance(value, Path):
             return str(value)
         return value
+    def _compile_generation_base_config(
+        self,
+        *,
+        base_generation: dict[str, Any] | None,
+        base_sampler: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """
+        Merge generation config layers:
+
+        1) sampler_base.yaml (algorithm defaults)
+        2) generation_base.yaml (pipeline behavior)
+        3) experiment overrides (highest priority)
+        """
+
+        resolved: dict[str, Any] = {}
+
+        # 1) sampler defaults
+        if base_sampler is not None:
+            resolved = copy.deepcopy(base_sampler)
+
+        # 2) generation base
+        if base_generation is not None:
+            self._deep_update(resolved, copy.deepcopy(base_generation))
+
+        # 3) experiment overrides
+        if isinstance(self.cfg.generation.overrides, dict):
+            self._deep_update(resolved, copy.deepcopy(self.cfg.generation.overrides))
+
+        # --- Validation ---
+        sampler = self._nested_get(resolved, ["generation", "sampler"], default={})
+
+        required = ["num_steps", "sigma_min", "sigma_max", "rho"]
+        for key in required:
+            if sampler.get(key) is None:
+                raise ValueError(
+                    f"Sampler parameter '{key}' is None after resolution. "
+                    "Check sampler_base.yaml and generation_base.yaml."
+                )
+
+        self._log(
+            "Resolved sampler parameters: "
+            f"num_steps={sampler.get('num_steps')}, "
+            f"sigma_min={sampler.get('sigma_min')}, "
+            f"sigma_max={sampler.get('sigma_max')}, "
+            f"rho={sampler.get('rho')}, "
+            f"S_churn={sampler.get('S_churn')}, "
+            f"S_min={sampler.get('S_min')}, "
+            f"S_max={sampler.get('S_max')}, "
+            f"S_noise={sampler.get('S_noise')}"
+        )
+
+        return resolved

@@ -72,6 +72,8 @@ class ModelSpec:
     target_width: int = 128
     cond_height: int = 128
     cond_width: int = 128
+    align_cond_to_target: bool = False
+    cond_upsample_mode: str = "bilinear"
 
     # Core UNet
     model_channels: int = 64
@@ -166,6 +168,12 @@ class ModelSpec:
             target_width=int(spatial_cfg.get("target_width", 128)),
             cond_height=int(spatial_cfg.get("cond_height", 128)),
             cond_width=int(spatial_cfg.get("cond_width", 128)),
+            align_cond_to_target=bool(
+                spatial_cfg.get("align_cond_to_target", False)
+            ),
+            cond_upsample_mode=str(
+                spatial_cfg.get("cond_upsample_mode", "bilinear")
+            ),
             model_channels=int(unet_cfg.get("model_channels", 64)),
             channel_mults=tuple(unet_cfg.get("channel_mults", [1, 2, 4, 4])),
             num_res_blocks=int(unet_cfg.get("num_res_blocks", 2)),
@@ -222,6 +230,10 @@ class ModelSpec:
             raise ValueError("target spatial dimensions must be positive")
         if self.cond_height <= 0 or self.cond_width <= 0:
             raise ValueError("conditioning spatial dimensions must be positive")
+        if self.cond_upsample_mode not in {"nearest", "bilinear"}:
+            raise ValueError(
+                "cond_upsample_mode must be one of {'nearest', 'bilinear'}"
+            )
 
         if self.model_channels <= 0:
             raise ValueError("model_channels must be > 0")

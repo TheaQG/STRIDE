@@ -127,6 +127,7 @@ class ExperimentBasesConfig:
     model_config_path: Path | None
     training_config_path: Path | None
     generation_config_path: Path | None
+    sampler_config_path: Path | None
     evaluation_config_path: Path | None
     data_config_path: Path | None
 
@@ -168,10 +169,20 @@ class ExperimentDomainConfig:
 
 
 @dataclass(frozen=True)
+class ExperimentStatisticsSplitConfig:
+    train: str | None = None
+    val: str | None = None
+    test: str | None = None
+
+
+@dataclass(frozen=True)
 class ExperimentSplitConfig:
     train: str | None = None
-    valid: str | None = None
+    val: str | None = None
     test: str | None = None
+    statistics: ExperimentStatisticsSplitConfig = field(
+        default_factory=ExperimentStatisticsSplitConfig
+    )
 
 
 @dataclass(frozen=True)
@@ -277,6 +288,10 @@ class ExperimentConfig:
         )
         domain_cfg = _require_dict(data_cfg.get("domain"), "data.domain")
         split_cfg = _require_dict(data_cfg.get("split"), "data.split")
+        statistics_split_cfg = _require_dict(
+            split_cfg.get("statistics"),
+            "data.split.statistics",
+        )
 
         target_variable = target_cfg.get("variable")
         if target_variable is not None and not isinstance(target_variable, str):
@@ -324,6 +339,9 @@ class ExperimentConfig:
                 ),
                 generation_config_path=_resolve_path(
                     bases_cfg.get("generation"), config_path=config_path
+                ),
+                sampler_config_path=_resolve_path(
+                    bases_cfg.get("sampler"), config_path=config_path
                 ),
                 evaluation_config_path=_resolve_path(
                     bases_cfg.get("evaluation"), config_path=config_path
@@ -374,8 +392,13 @@ class ExperimentConfig:
                 ),
                 split=ExperimentSplitConfig(
                     train=split_cfg.get("train"),
-                    valid=split_cfg.get("valid"),
+                    val=split_cfg.get("val"),
                     test=split_cfg.get("test"),
+                    statistics=ExperimentStatisticsSplitConfig(
+                        train=statistics_split_cfg.get("train"),
+                        val=statistics_split_cfg.get("val"),
+                        test=statistics_split_cfg.get("test"),
+                    ),
                 ),
                 overrides=_require_dict(data_cfg.get("overrides"), "data.overrides"),
             ),

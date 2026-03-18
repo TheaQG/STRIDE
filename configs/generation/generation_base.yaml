@@ -26,12 +26,6 @@ generation:
     output_format: "npz"
     storage_mode: "per_member_bundle" # later: "ensemble_bundle", "per_case"
 
-  sampler:
-    num_steps: null      # null = use generation_config default
-    sigma_min: null
-    sigma_max: null
-    rho: null
-
   limits:
     max_cases: 3         # small smoke-test limit
 

@@ -1,15 +1,9 @@
 model:
   name: edm_unet
 
-  in_dynamic_channels: 2
-  in_static_channels: 2
-  out_channels: 1
-
   spatial:
-    target_height: 128
-    target_width: 128
-    cond_height: 128
-    cond_width: 128
+    align_cond_to_target: true
+    cond_upsample_mode: bilinear
 
   unet:
     model_channels: 64
