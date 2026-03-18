@@ -9,6 +9,16 @@ Current intended default use:
 - training split only
 - CDO backend
 - one statistics JSON per variable/source/transform combination
+
+To launch statistics, e.g. (after launching splits with launch_splits.py):
+python -m data_adapters.norcp.launch_statistics \
+  --root-dir /Users/au728490/Data/NorCP/cropped \
+  --scenario-name ECMWF-ERAINT \
+  --split-manifest-path /Users/au728490/Code/STRIDE/data_adapters/norcp/saved/splits/temporal__ECMWF-ERAINT__train_auto_auto__val_2010-01-01T00-00-00_2012-12-31T18-00-00__test_2013-01-01T00-00-00_2018-12-31T18-00-00.json \
+  --split-name train \
+  --domain-tag full_domain \
+  --backend cdo \
+  --include-static
 """
 
 from __future__ import annotations
