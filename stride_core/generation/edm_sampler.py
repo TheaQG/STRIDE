@@ -27,6 +27,7 @@ from typing import Any
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 @torch.no_grad()
@@ -133,11 +134,6 @@ def edm_sampler(
             raise ValueError(
                 f"Batch mismatch between cond_dynamic and cond_static: {cond_dynamic.shape[0]} vs {cond_static.shape[0]}"
             )
-        if cond_static.shape[2:] != cond_dynamic.shape[2:]:
-            raise ValueError(
-                "Spatial mismatch between cond_dynamic and cond_static: "
-                f"{tuple(cond_dynamic.shape[2:])} vs {tuple(cond_static.shape[2:])}"
-            )
 
     if y is not None:
         if y.ndim != 2:
@@ -163,6 +159,41 @@ def edm_sampler(
     device = cond_dynamic.device
     dtype = cond_dynamic.dtype
     batch_size = cond_dynamic.shape[0]
+
+    spec = getattr(model, "spec", None)
+    align_cond_to_target = bool(getattr(spec, "align_cond_to_target", False))
+    cond_upsample_mode = str(getattr(spec, "cond_upsample_mode", "bilinear"))
+    target_height = getattr(spec, "target_height", None)
+    target_width = getattr(spec, "target_width", None)
+
+    if align_cond_to_target:
+        if target_height is not None and target_width is not None:
+            target_hw = (int(target_height), int(target_width))
+        elif cond_static is not None:
+            target_hw = tuple(cond_static.shape[2:])
+        else:
+            target_hw = tuple(cond_dynamic.shape[2:])
+
+        cond_dynamic = F.interpolate(
+            cond_dynamic,
+            size=target_hw,
+            mode=cond_upsample_mode,
+            align_corners=False if cond_upsample_mode == "bilinear" else None,
+        )
+        if cond_static is not None and cond_static.shape[2:] != target_hw:
+            cond_static = F.interpolate(
+                cond_static,
+                size=target_hw,
+                mode=cond_upsample_mode,
+                align_corners=False if cond_upsample_mode == "bilinear" else None,
+            )
+
+    if cond_static is not None and cond_static.shape[2:] != cond_dynamic.shape[2:]:
+        raise ValueError(
+            "Spatial mismatch between cond_dynamic and cond_static after alignment: "
+            f"{tuple(cond_dynamic.shape[2:])} vs {tuple(cond_static.shape[2:])}"
+        )
+
     height, width = cond_dynamic.shape[2:]
 
     out_channels = getattr(getattr(model, "spec", None), "out_channels", None)

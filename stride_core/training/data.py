@@ -35,6 +35,7 @@ from torch.utils.data import DataLoader, Dataset
 import yaml
 
 from data_adapters.danra_era5_small.adapter import DanraEra5SmallAdapter
+from data_adapters.norcp.adapter import NorCPAdapter
 from stride_core.configs.adapter_config import AdapterConfig
 
 
@@ -189,13 +190,22 @@ class BuiltTrainingData:
 # -----------------------------------------------------------------------------
 
 
-def build_dataset_adapter(adapter_config: AdapterConfig) -> DanraEra5SmallAdapter:
+def build_dataset_adapter(adapter_config: AdapterConfig) -> DanraEra5SmallAdapter | NorCPAdapter:
     """
-    Build the STRIDE v1 dataset adapter.
+    Build the dataset adapter for the configured STRIDE dataset.
 
-    In STRIDE v1 we only support the danra_era5_small adapter.
-    Later this should become registry-driven.
+    Current supported adapters:
+    - DanraEra5SmallAdapter
+    - NorCPAdapter
+
+    Still an explicit dispatcher rather than a full registry, but currently enough to support multiple datasets without overengineering.
     """
+
+    if (
+        adapter_config.scenario_name is not None
+        or adapter_config.target_source == "NORCP_HR"
+    ):
+        return NorCPAdapter(adapter_config)
 
     return DanraEra5SmallAdapter(adapter_config)
 
@@ -350,11 +360,11 @@ def build_training_data(training_config_path: str | Path) -> BuiltTrainingData:
     if "train" not in datasets:
         raise KeyError("Adapter did not return a 'train' dataset")
 
-    if "valid" not in datasets:
-        raise KeyError("Adapter did not return a 'valid' dataset")
+    if "val" not in datasets:
+        raise KeyError("Adapter did not return a 'val' dataset")
 
     train_dataset = datasets["train"]
-    val_dataset = datasets["valid"]
+    val_dataset = datasets["val"]
 
     train_loader = build_dataloader(
         train_dataset,

@@ -1,5 +1,3 @@
-
-
 """
 Decoder modules for STRIDE EDM-style UNets.
 
@@ -106,8 +104,10 @@ class SkipFusion(nn.Module):
                 f"Batch size mismatch between x and skip: {x.shape[0]} vs {skip.shape[0]}"
             )
         if x.shape[2:] != skip.shape[2:]:
+            x = F.interpolate(x, size=skip.shape[2:], mode="nearest")
+        if x.shape[2:] != skip.shape[2:]:
             raise ValueError(
-                f"Spatial mismatch between x and skip: {tuple(x.shape[2:])} vs {tuple(skip.shape[2:])}"
+                f"Spatial mismatch between x and skip after alignment: {tuple(x.shape[2:])} vs {tuple(skip.shape[2:])}"
             )
         if x.shape[1] != self.in_channels:
             raise ValueError(

@@ -162,15 +162,17 @@ class EDMUNet(nn.Module):
 
     @staticmethod
     def _validate_spec_for_v1(spec: ModelSpec) -> None:
-        if spec.target_height != spec.target_width:
+        # Non-square targets are allowed.
+
+        # If conditioning is not aligned to the target grid, the model must
+        # explicitly enable alignment.
+        if (
+            spec.cond_height != spec.target_height
+            or spec.cond_width != spec.target_width
+        ) and not spec.align_cond_to_target:
             raise ValueError(
-                "The first EDMUNet implementation currently expects square HR "
-                f"inputs, got {(spec.target_height, spec.target_width)}"
-            )
-        if spec.cond_height != spec.target_height or spec.cond_width != spec.target_width:
-            raise ValueError(
-                "The first EDMUNet implementation expects co-located conditioning "
-                "with the same spatial size as the target. "
+                "Conditioning grid differs from target grid but "
+                "align_cond_to_target=False. "
                 f"Got target={(spec.target_height, spec.target_width)} and "
                 f"cond={(spec.cond_height, spec.cond_width)}"
             )
@@ -184,6 +186,38 @@ class EDMUNet(nn.Module):
                 "Temporal stacking support is not implemented in EDMUNet v1 yet. "
                 "Set use_temporal_stack=False."
             )
+    def _align_conditioning(
+        self,
+        cond_dynamic: torch.Tensor,
+        cond_static: torch.Tensor | None,
+        target_hw: tuple[int, int],
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """
+        Optionally resize conditioning fields to the target resolution.
+        """
+        if not self.spec.align_cond_to_target:
+            return cond_dynamic, cond_static
+
+        import torch.nn.functional as F
+
+        mode = self.spec.cond_upsample_mode
+
+        cond_dynamic = F.interpolate(
+            cond_dynamic,
+            size=target_hw,
+            mode=mode,
+            align_corners=False if mode == "bilinear" else None,
+        )
+
+        if cond_static is not None:
+            cond_static = F.interpolate(
+                cond_static,
+                size=target_hw,
+                mode=mode,
+                align_corners=False if mode == "bilinear" else None,
+            )
+
+        return cond_dynamic, cond_static
 
     def _build_film_embedding(
         self,
@@ -417,6 +451,12 @@ class EDMUNet(nn.Module):
             Predicted residual / denoised field with shape `[B, C_out, H, W]`.
             If `return_aux=True`, also returns a dictionary of auxiliary outputs.
         """
+        cond_dynamic, cond_static = self._align_conditioning(
+            cond_dynamic,
+            cond_static,
+            target_hw=x.shape[2:], # type: ignore[union-attr],
+        )
+
         model_input = self._assemble_input(
             x=x,
             cond_dynamic=cond_dynamic,
