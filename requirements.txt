@@ -1,0 +1,29 @@
+# Core ML
+torch
+
+# Scientific stack
+numpy
+pandas
+xarray
+
+# Plotting
+matplotlib
+
+# Configs / IO
+pyyaml
+
+# Optional but used in plotting utils
+scipy
+
+# For NetCDF / xarray backend (very likely needed)
+netCDF4
+
+# For mpl_toolkits (usually bundled with matplotlib, but safe)
+cycler
+
+# For CDO
+cdo
+
+# Data handlings
+zarr
+dask
