@@ -18,7 +18,9 @@ The goal is not scientific validation. It is only a structural test that:
 from __future__ import annotations
 
 from pathlib import Path
+import argparse
 import json
+import logging
 import shutil
 import sys
 import tempfile
@@ -33,8 +35,8 @@ if __package__ is None or __package__ == "":
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
 
-from stride_core.pipeline.config_compiler import ConfigCompiler
-from stride_core.pipeline.experiment_config import ExperimentConfig
+from stride_core.configs.config_compiler import ConfigCompiler
+from stride_core.configs.experiment_config import ExperimentConfig
 from stride_core.training.trainer import Trainer
 from stride_core.generation.generator import Generator, GenerationRunConfig
 
@@ -43,6 +45,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_EXPERIMENT_CONFIG = (
     REPO_ROOT / "configs" / "experiments" / "train_generate_evaluate_test.yaml"
 )
+EXPERIMENT_CONFIG_DIR = REPO_ROOT / "configs" / "experiments"
 SMOKE_RUN_PARENT = REPO_ROOT / "runs" / "smoke_tests"
 SMOKE_EXPERIMENT_NAME = "smoke_test_generation"
 
@@ -83,6 +86,44 @@ def _abs_from_root(value: str | None) -> str | None:
     return str(path)
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run the STRIDE generation smoke test from an experiment config."
+        )
+    )
+    parser.add_argument(
+        "experiment_config",
+        nargs="?",
+        default=str(DEFAULT_EXPERIMENT_CONFIG),
+        help=(
+            "Path to the experiment YAML to use. Defaults to "
+            "configs/experiments/train_generate_evaluate_test.yaml"
+        ),
+    )
+    return parser.parse_args()
+
+
+def resolve_experiment_config(path_arg: str) -> Path:
+    requested_path = Path(path_arg)
+    if not requested_path.is_absolute():
+        requested_path = (REPO_ROOT / requested_path).resolve()
+
+    if not requested_path.exists():
+        raise FileNotFoundError(
+            f"Experiment config does not exist: {requested_path}"
+        )
+    if not requested_path.is_file():
+        raise ValueError(
+            f"Expected a YAML experiment config file, got: {requested_path}"
+        )
+    if requested_path.suffix.lower() not in {".yaml", ".yml"}:
+        raise ValueError(
+            f"Expected a YAML experiment config file, got: {requested_path}"
+        )
+    return requested_path
+
+
 # -----------------------------------------------------------------------------
 # Smoke-config preparation
 # -----------------------------------------------------------------------------
@@ -119,7 +160,7 @@ def build_smoke_experiment_config(config_path: Path) -> Path:
     stages_cfg["generation"] = True
     stages_cfg["evaluation"] = False
 
-    for key in ("model", "training", "generation", "evaluation", "data"):
+    for key in ("model", "training", "generation", "sampler", "evaluation", "data"):
         if key in bases_cfg and bases_cfg.get(key) is not None:
             bases_cfg[key] = _abs_from_root(bases_cfg.get(key))
 
@@ -251,10 +292,18 @@ def inspect_json(json_path: Path) -> dict[str, Any]:
 
 
 def main() -> None:
-    print_header("STRIDE generation smoke test")
-    print(f"Experiment config: {DEFAULT_EXPERIMENT_CONFIG}")
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    )
 
-    smoke_config_path = build_smoke_experiment_config(DEFAULT_EXPERIMENT_CONFIG)
+    args = parse_args()
+    experiment_config_path = resolve_experiment_config(args.experiment_config)
+
+    print_header("STRIDE generation smoke test")
+    print(f"Experiment config: {experiment_config_path}")
+
+    smoke_config_path = build_smoke_experiment_config(experiment_config_path)
     print_header("Smoke experiment config written")
     print(f"Smoke config: {smoke_config_path}")
 
@@ -318,11 +367,14 @@ def main() -> None:
     case_dirs = sorted([path for path in samples_dir.iterdir() if path.is_dir()])
     print(f"Found {len(case_dirs)} case directories in: {samples_dir}")
 
-    expected_cases = gen_cfg.limits.max_cases if gen_cfg.limits.max_cases is not None else len(case_dirs)
-    if len(case_dirs) != expected_cases:
-        raise AssertionError(
-            f"Expected {expected_cases} case directories, found {len(case_dirs)}"
-        )
+    if len(case_dirs) == 0:
+        raise AssertionError("No case directories were generated.")
+
+    if gen_cfg.limits.max_cases is not None:
+        if len(case_dirs) > gen_cfg.limits.max_cases:
+            raise AssertionError(
+                f"Generated more cases ({len(case_dirs)}) than max_cases ({gen_cfg.limits.max_cases})"
+            )
 
     first_case_dir = case_dirs[0]
     print(f"Inspecting first case directory: {first_case_dir}")

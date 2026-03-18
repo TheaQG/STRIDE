@@ -83,6 +83,8 @@ def plot_adapter_sample(
         ax.axis("off")
 
     fig.tight_layout(rect=(0, 0, 1, 0.96))
+    # save
+    fig.savefig("norcp_adapter_sample_inspection.png", dpi=300)
     plt.show()
 
 

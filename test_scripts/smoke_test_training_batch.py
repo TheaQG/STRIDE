@@ -23,6 +23,8 @@ optimizer.step()
 """
 from collections.abc import Sized
 from pathlib import Path
+import argparse
+import logging
 import sys
 from typing import Any
 
@@ -34,14 +36,15 @@ if str(REPO_ROOT) not in sys.path:
 import torch
 import yaml
 
+from stride_core.configs.config_compiler import ConfigCompiler
+from stride_core.configs.experiment_config import ExperimentConfig
 from stride_core.configs.model_config import ModelSpec
 from stride_core.models.build_model import build_model
 from stride_core.models.edm_loss import EDMLoss
 from stride_core.training.data import build_training_data, describe_batch
+from test_scripts.utils.validation import validate_model_data_contract
 
-
-TRAINING_CONFIG_PATH = REPO_ROOT / "configs" / "training" / "train_edm_small.yaml"
-
+EXPERIMENT_CONFIG_DIR = REPO_ROOT / "configs" / "experiments"
 
 def print_section(title: str) -> None:
     print("\n" + "=" * len(title))
@@ -59,41 +62,68 @@ def print_nested_dict(d: dict[str, Any], indent: int = 0) -> None:
         else:
             print(f"{prefix}{key}: {value}")
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run the STRIDE training batch smoke test for one experiment config, "
+            "or for all experiment configs in a directory."
+        )
+    )
+    parser.add_argument(
+        "experiment_config",
+        nargs="?",
+        default=None,
+        help=(
+            "Optional path to a specific experiment YAML, or a directory of experiment YAMLs. "
+            "If omitted, all YAML files under configs/experiments are used."
+        ),
+    )
+    return parser.parse_args()
+
+
+
+def discover_experiment_configs(path_arg: str | None = None) -> list[Path]:
+    if path_arg is None:
+        search_dir = EXPERIMENT_CONFIG_DIR
+        if not search_dir.exists():
+            raise FileNotFoundError(
+                f"Experiment config directory does not exist: {search_dir}"
+            )
+        paths = sorted(search_dir.glob("*.yaml"))
+        if not paths:
+            raise FileNotFoundError(
+                f"No experiment YAML files found in: {search_dir}"
+            )
+        return paths
+    
+    requested_path = Path(path_arg)
+    if not requested_path.is_absolute():
+        requested_path = (REPO_ROOT / requested_path).resolve()
+
+    if requested_path.is_file():
+        if requested_path.suffix.lower() not in {".yaml", ".yml"}:
+            raise ValueError(
+                f"Expected a YAML experiment config file, got: {requested_path}"
+            )
+        return [requested_path]
+
+    if requested_path.is_dir():
+        paths = sorted(requested_path.glob("*.yaml"))
+        if not paths:
+            raise FileNotFoundError(
+                f"No experiment YAML files found in: {requested_path}"
+            )
+        return paths
+
+    raise FileNotFoundError(
+        f"Experiment config path does not exist: {requested_path}"
+    )
 
 
 def safe_len(obj: Any) -> int | None:
     if isinstance(obj, Sized):
         return len(obj)
     return None
-
-
-
-def load_model_spec_from_training_config(training_config_path: Path) -> ModelSpec:
-    with open(training_config_path, "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
-
-    if not isinstance(cfg, dict):
-        raise ValueError(
-            f"Expected training config to load into a dict, got {type(cfg)}"
-        )
-
-    training_cfg = cfg.get("training")
-    if not isinstance(training_cfg, dict):
-        raise ValueError("Expected top-level 'training' section to be a dict")
-
-    configs_cfg = training_cfg.get("configs")
-    if not isinstance(configs_cfg, dict):
-        raise ValueError("Expected 'training.configs' section to be a dict")
-
-    model_config_raw = configs_cfg.get("model_config")
-    if model_config_raw is None:
-        raise KeyError("Missing required key 'training.configs.model_config'")
-
-    model_config_path = Path(model_config_raw)
-    if not model_config_path.is_absolute():
-        model_config_path = REPO_ROOT / model_config_path
-
-    return ModelSpec.from_yaml(model_config_path)
 
 
 
@@ -111,12 +141,32 @@ def move_batch_to_device(batch: dict[str, Any], device: torch.device) -> dict[st
 
 
 
-def main() -> None:
-    print_section("STRIDE training batch smoke test")
-    print(f"Training config: {TRAINING_CONFIG_PATH}")
+def run_test_case(experiment_config_path: Path) -> None:
+    print("\n----------------------------------------")
+    print(f"Experiment config: {experiment_config_path}")
+    print("----------------------------------------")
 
-    print_section("Building train/valid data")
-    built = build_training_data(TRAINING_CONFIG_PATH)
+    exp_cfg = ExperimentConfig.from_yaml(experiment_config_path)
+    compiler = ConfigCompiler(exp_cfg)
+    compiled = compiler.compile()
+
+    training_config_path = compiled.training_run_config_path
+    model_config_path = compiled.model_config_path
+
+    if training_config_path is None:
+        raise RuntimeError(
+            f"Compiler did not produce a training run config for experiment: {experiment_config_path}"
+        )
+    if model_config_path is None:
+        raise RuntimeError(
+            f"Compiler did not produce a model config for experiment: {experiment_config_path}"
+        )
+
+    print(f"Training config: {training_config_path}")
+    print(f"Model config:    {model_config_path}")
+
+    print_section("Building training data")
+    built = build_training_data(training_config_path)
 
     train_dataset_len = safe_len(built.train_dataset)
     val_dataset_len = safe_len(built.val_dataset)
@@ -134,7 +184,10 @@ def main() -> None:
     print_nested_dict(describe_batch(batch))
 
     print_section("Building model + loss")
-    model_spec = load_model_spec_from_training_config(TRAINING_CONFIG_PATH)
+    model_spec = ModelSpec.from_yaml(model_config_path)
+    validate_model_data_contract(model_spec, batch)
+    print("Validated training batch against compiled model contract.")
+
     model = build_model(model_spec)
     loss_fn = EDMLoss()
 
@@ -187,6 +240,21 @@ def main() -> None:
     optimizer.step()
     print("Optimizer step completed.")
 
+def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    )
+
+    print_section("STRIDE training batch smoke test")
+    args = parse_args()
+    experiment_config_paths = discover_experiment_configs(args.experiment_config)
+    print(f"Discovered {len(experiment_config_paths)} experiment config(s) to test.")
+    
+    for experiment_config_path in experiment_config_paths:
+        run_test_case(experiment_config_path)
+
+    
     print_section("Training batch smoke test completed successfully")
 
 

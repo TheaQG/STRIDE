@@ -29,8 +29,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from stride_core.pipeline.config_compiler import ConfigCompiler
-from stride_core.pipeline.experiment_config import ExperimentConfig
+from stride_core.configs.config_compiler import ConfigCompiler
+from stride_core.configs.experiment_config import ExperimentConfig
 from stride_core.training.trainer import Trainer
 
 

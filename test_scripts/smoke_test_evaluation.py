@@ -2,19 +2,23 @@
 Smoke test for the STRIDE evaluation pipeline.
 
 This script performs a minimal end-to-end structural check:
-1. Load the run-level evaluation config.
-2. Rewrite relevant config paths to absolute paths in a temporary smoke config.
-3. Initialize EvaluationRunConfig and Evaluator.
-4. Run evaluation.
-5. Verify that the expected output file exists and has the expected top-level structure.
+1. Load an experiment config.
+2. Rewrite relevant experiment overrides into a temporary smoke config.
+3. Compile the experiment into resolved stage configs.
+4. Initialize EvaluationRunConfig and Evaluator from the compiled evaluation config.
+5. Run evaluation.
+6. Verify that the expected output file exists and has the expected top-level structure.
 
 The goal is to validate orchestration and file plumbing, not scientific correctness.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
+import logging
 from pathlib import Path
+import shutil
 import sys
 import tempfile
 from typing import Any
@@ -29,13 +33,17 @@ if __package__ is None or __package__ == "":
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
 
+from stride_core.configs.config_compiler import ConfigCompiler
+from stride_core.configs.experiment_config import ExperimentConfig
 from stride_core.evaluation.evaluation_config import EvaluationRunConfig
 from stride_core.evaluation.data_loading import EvaluationDataLoader
 from stride_core.evaluation.evaluator import Evaluator
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CONFIG = ROOT / "configs" / "evaluation_runs" / "evaluate_test_best.yaml"
+DEFAULT_EXPERIMENT_CONFIG = (
+    ROOT / "configs" / "experiments" / "train_generate_evaluate_test.yaml"
+)
 
 
 def print_header(title: str) -> None:
@@ -48,13 +56,43 @@ def require_file(path: Path) -> None:
         raise FileNotFoundError(f"Expected file does not exist: {path}")
 
 
-def _abs_from_root(value: Any) -> str | None:
-    if value is None:
-        return None
-    path = Path(str(value))
-    if not path.is_absolute():
-        path = (ROOT / path).resolve()
-    return str(path)
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run the STRIDE evaluation smoke test from an experiment config."
+        )
+    )
+    parser.add_argument(
+        "experiment_config",
+        nargs="?",
+        default=str(DEFAULT_EXPERIMENT_CONFIG),
+        help=(
+            "Path to the experiment YAML to use. Defaults to "
+            "configs/experiments/train_generate_evaluate_test.yaml"
+        ),
+    )
+    return parser.parse_args()
+
+
+
+def resolve_experiment_config(path_arg: str) -> Path:
+    requested_path = Path(path_arg)
+    if not requested_path.is_absolute():
+        requested_path = (ROOT / requested_path).resolve()
+
+    if not requested_path.exists():
+        raise FileNotFoundError(
+            f"Experiment config does not exist: {requested_path}"
+        )
+    if not requested_path.is_file():
+        raise ValueError(
+            f"Expected a YAML experiment config file, got: {requested_path}"
+        )
+    if requested_path.suffix.lower() not in {".yaml", ".yml"}:
+        raise ValueError(
+            f"Expected a YAML experiment config file, got: {requested_path}"
+        )
+    return requested_path
 
 
 def build_smoke_config(config_path: Path) -> Path:
@@ -65,48 +103,83 @@ def build_smoke_config(config_path: Path) -> Path:
 
     if not isinstance(payload, dict):
         raise ValueError(
-            f"Expected evaluation run config root to be a dict, got {type(payload)}"
+            f"Expected experiment config root to be a dict, got {type(payload)}"
         )
 
-    run_cfg = payload.get("evaluation_run")
-    if not isinstance(run_cfg, dict):
+    experiment_cfg = payload.setdefault("experiment", {})
+    if not isinstance(experiment_cfg, dict):
         raise ValueError(
-            f"Expected 'evaluation_run' to be a dict, got {type(run_cfg)}"
+            f"Expected 'experiment' to be a dict, got {type(experiment_cfg)}"
         )
+    experiment_cfg["name"] = "smoke_test_evaluation"
+    experiment_cfg["output_root"] = str((ROOT / "runs" / "smoke_tests").resolve())
 
-    paths_cfg = run_cfg.get("paths")
-    if not isinstance(paths_cfg, dict):
+    bases_cfg = payload.get("bases")
+    if not isinstance(bases_cfg, dict):
+        raise ValueError(f"Expected 'bases' to be a dict, got {type(bases_cfg)}")
+
+    for key in ("model", "training", "generation", "sampler", "evaluation", "data"):
+        if key in bases_cfg and bases_cfg.get(key) is not None:
+            path = Path(str(bases_cfg.get(key)))
+            if not path.is_absolute():
+                bases_cfg[key] = str((ROOT / path).resolve())
+
+    stages_cfg = payload.get("stages")
+    if not isinstance(stages_cfg, dict):
+        raise ValueError(f"Expected 'stages' to be a dict, got {type(stages_cfg)}")
+    stages_cfg["training"] = False
+    stages_cfg["generation"] = False
+    stages_cfg["evaluation"] = True
+
+    evaluation_cfg = payload.setdefault("evaluation", {})
+    if not isinstance(evaluation_cfg, dict):
         raise ValueError(
-            f"Expected 'evaluation_run.paths' to be a dict, got {type(paths_cfg)}"
+            f"Expected 'evaluation' to be a dict, got {type(evaluation_cfg)}"
         )
 
-    data_cfg = run_cfg.get("data")
+    overrides_cfg = evaluation_cfg.setdefault("overrides", {})
+    if not isinstance(overrides_cfg, dict):
+        raise ValueError(
+            f"Expected 'evaluation.overrides' to be a dict, got {type(overrides_cfg)}"
+        )
+
+    evaluation_run_cfg = overrides_cfg.setdefault("evaluation_run", {})
+    if not isinstance(evaluation_run_cfg, dict):
+        raise ValueError(
+            "Expected 'evaluation.overrides.evaluation_run' to be a dict, "
+            f"got {type(evaluation_run_cfg)}"
+        )
+
+    data_cfg = evaluation_run_cfg.setdefault("data", {})
     if not isinstance(data_cfg, dict):
         raise ValueError(
-            f"Expected 'evaluation_run.data' to be a dict, got {type(data_cfg)}"
+            "Expected 'evaluation.overrides.evaluation_run.data' to be a dict, "
+            f"got {type(data_cfg)}"
         )
 
-    outputs_cfg = run_cfg.get("outputs")
-    if not isinstance(outputs_cfg, dict):
+    paths_cfg = evaluation_run_cfg.setdefault("paths", {})
+    if not isinstance(paths_cfg, dict):
         raise ValueError(
-            f"Expected 'evaluation_run.outputs' to be a dict, got {type(outputs_cfg)}"
+            "Expected 'evaluation.overrides.evaluation_run.paths' to be a dict, "
+            f"got {type(paths_cfg)}"
         )
 
-    # Rewrite all relevant paths to absolute paths anchored at repo root.
-    for key in (
-        "evaluation_config",
-        "generation_output_dir",
-        "dataset_config",
-        "training_config",
-        "generation_run_config",
-    ):
-        if key in paths_cfg:
-            paths_cfg[key] = _abs_from_root(paths_cfg.get(key))
+    smoke_generation_root = (ROOT / "runs" / "smoke_tests" / "smoke_test_generation").resolve()
+    smoke_generation_compiled = smoke_generation_root / "compiled_configs"
 
-    if "output_dir" in outputs_cfg:
-        outputs_cfg["output_dir"] = _abs_from_root(outputs_cfg.get("output_dir"))
+    paths_cfg["generation_output_dir"] = str(
+        (smoke_generation_root / "generation").resolve()
+    )
+    paths_cfg["dataset_config"] = str(
+        (smoke_generation_compiled / "data_resolved.yaml").resolve()
+    )
+    paths_cfg["training_config"] = str(
+        (smoke_generation_compiled / "training_run_resolved.yaml").resolve()
+    )
+    paths_cfg["generation_run_config"] = str(
+        (smoke_generation_compiled / "generation_run_resolved.yaml").resolve()
+    )
 
-    # Keep the smoke test small even if the run config forgot to limit cases.
     use_case_limit = data_cfg.get("use_case_limit")
     if use_case_limit is None or int(use_case_limit) > 3:
         data_cfg["use_case_limit"] = 3
@@ -126,6 +199,15 @@ def load_json(path: Path) -> dict[str, Any]:
         payload = json.load(f)
     if not isinstance(payload, dict):
         raise ValueError(f"Expected JSON object in {path}, got {type(payload)}")
+    return payload
+
+
+def load_jsonable_yaml(path: Path) -> dict[str, Any]:
+    require_file(path)
+    with open(path, "r", encoding="utf-8") as f:
+        payload = yaml.safe_load(f)
+    if not isinstance(payload, dict):
+        raise ValueError(f"Expected YAML object in {path}, got {type(payload)}")
     return payload
 
 
@@ -413,7 +495,11 @@ def evaluator_stack_temporal_targets(targets: list[Any]):
 
 def check_temporal_shapes(cfg: EvaluationRunConfig) -> None:
     loader = EvaluationDataLoader(cfg)
-    cases = list(loader.iter_cases())
+    cases = []
+    for idx, case in enumerate(loader.iter_cases()):
+        cases.append(case)
+        if idx >= 2:
+            break
     if len(cases) == 0:
         raise AssertionError("No cases available for temporal shape check")
 
@@ -451,17 +537,67 @@ def check_temporal_shapes(cfg: EvaluationRunConfig) -> None:
 
 
 def main() -> None:
-    config_path = DEFAULT_CONFIG.resolve()
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    )
+
+    args = parse_args()
+    experiment_config_path = resolve_experiment_config(args.experiment_config)
 
     print_header("STRIDE evaluation smoke test")
-    print(f"Evaluation config: {config_path}")
+    print(f"Experiment config: {experiment_config_path}")
 
     print_header("Preparing smoke config")
-    smoke_config_path = build_smoke_config(config_path)
+    smoke_config_path = build_smoke_config(experiment_config_path)
     print(f"Smoke config: {smoke_config_path}")
 
+    exp_cfg = ExperimentConfig.from_yaml(smoke_config_path)
+    compiler = ConfigCompiler(exp_cfg)
+    compiled = compiler.compile()
+
+    experiment_root = compiled.experiment_root
+    if experiment_root.exists():
+        shutil.rmtree(experiment_root)
+        compiled = compiler.compile()
+        experiment_root = compiled.experiment_root
+
+    evaluation_config_path = compiled.evaluation_run_config_path
+    if evaluation_config_path is None:
+        raise RuntimeError(
+            f"Compiler did not produce an evaluation config for experiment: {experiment_config_path}"
+        )
+
+    print_header("Compiled smoke configs")
+    print(f"Evaluation config: {evaluation_config_path}")
+    print(f"Experiment root:   {experiment_root}")
+
+    smoke_generation_root = (ROOT / "runs" / "smoke_tests" / "smoke_test_generation").resolve()
+    smoke_generation_compiled = smoke_generation_root / "compiled_configs"
+
+    compiled_eval_payload = load_jsonable_yaml(evaluation_config_path)
+    run_cfg = compiled_eval_payload.get("evaluation_run")
+    if not isinstance(run_cfg, dict):
+        raise ValueError(
+            f"Expected compiled evaluation config to contain 'evaluation_run', got {type(run_cfg)}"
+        )
+
+    paths_cfg = run_cfg.setdefault("paths", {})
+    if not isinstance(paths_cfg, dict):
+        raise ValueError(
+            f"Expected compiled evaluation config paths to be a dict, got {type(paths_cfg)}"
+        )
+
+    paths_cfg["generation_output_dir"] = str((smoke_generation_root / "generation").resolve())
+    paths_cfg["dataset_config"] = str((smoke_generation_compiled / "data_resolved.yaml").resolve())
+    paths_cfg["training_config"] = str((smoke_generation_compiled / "training_run_resolved.yaml").resolve())
+    paths_cfg["generation_run_config"] = str((smoke_generation_compiled / "generation_run_resolved.yaml").resolve())
+
+    with open(evaluation_config_path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(compiled_eval_payload, f, sort_keys=False)
+
     print_header("Initializing evaluator")
-    cfg = EvaluationRunConfig.from_yaml(smoke_config_path)
+    cfg = EvaluationRunConfig.from_yaml(evaluation_config_path)
     evaluator = Evaluator(cfg)
     print("Evaluator initialized successfully.")
 

@@ -10,8 +10,8 @@ if str(REPO_ROOT) not in sys.path:
 
 import yaml
 
-from stride_core.pipeline.config_compiler import ConfigCompiler
-from stride_core.pipeline.experiment_config import ExperimentConfig
+from stride_core.configs.config_compiler import ConfigCompiler
+from stride_core.configs.experiment_config import ExperimentConfig
 from stride_core.training.trainer import Trainer
 
 
