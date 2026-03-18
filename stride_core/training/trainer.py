@@ -241,6 +241,11 @@ class Trainer:
         self.cfg = TrainingRunConfig.from_yaml(training_config_path)
 
         self.device = self._resolve_device(self.cfg.accelerator)
+        self.use_amp = self.device.type == "cuda"
+        self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
+        if self.device.type == "cuda":
+            torch.backends.cudnn.benchmark = True
+            torch.backends.cudnn.deterministic = False
         self.checkpoint_dir = ensure_checkpoint_dir(self.cfg.output_dir / "checkpoints")
 
         self._set_seed(self.cfg.seed)
@@ -403,18 +408,20 @@ class Trainer:
 
             self.optimizer.zero_grad(set_to_none=True)
 
-            loss = self.loss_fn(model=self.model, batch=batch)
-            if not isinstance(loss, torch.Tensor):
-                raise TypeError(
-                    f"Expected loss_fn to return a torch.Tensor, got {type(loss)}"
-                )
-            if loss.ndim != 0:
-                raise ValueError(
-                    f"Expected scalar loss, got shape {tuple(loss.shape)}"
-                )
+            with torch.cuda.amp.autocast(enabled=self.use_amp):
+                loss = self.loss_fn(model=self.model, batch=batch)
+                if not isinstance(loss, torch.Tensor):
+                    raise TypeError(
+                        f"Expected loss_fn to return a torch.Tensor, got {type(loss)}"
+                    )
+                if loss.ndim != 0:
+                    raise ValueError(
+                        f"Expected scalar loss, got shape {tuple(loss.shape)}"
+                    )
 
-            loss.backward()
-            self.optimizer.step()
+            self.scaler.scale(loss).backward()
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
 
             if self.ema is not None:
                 self.ema.update(self.model)
@@ -467,15 +474,16 @@ class Trainer:
 
             batch = self._move_batch_to_device(batch, self.device)
 
-            loss = self.loss_fn(model=eval_model, batch=batch)
-            if not isinstance(loss, torch.Tensor):
-                raise TypeError(
-                    f"Expected loss_fn to return a torch.Tensor, got {type(loss)}"
-                )
-            if loss.ndim != 0:
-                raise ValueError(
-                    f"Expected scalar loss, got shape {tuple(loss.shape)}"
-                )
+            with torch.cuda.amp.autocast(enabled=self.use_amp):
+                loss = self.loss_fn(model=eval_model, batch=batch)
+                if not isinstance(loss, torch.Tensor):
+                    raise TypeError(
+                        f"Expected loss_fn to return a torch.Tensor, got {type(loss)}"
+                    )
+                if loss.ndim != 0:
+                    raise ValueError(
+                        f"Expected scalar loss, got shape {tuple(loss.shape)}"
+                    )
 
             loss_value = float(loss.item())
             total_loss += loss_value
@@ -852,7 +860,7 @@ class Trainer:
     def _move_batch_to_device(batch: dict[str, Any], device: torch.device) -> dict[str, Any]:
         def _move(value: Any) -> Any:
             if isinstance(value, torch.Tensor):
-                return value.to(device)
+                return value.to(device, non_blocking=True)
             if isinstance(value, dict):
                 return {k: _move(v) for k, v in value.items()}
             if isinstance(value, list):

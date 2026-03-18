@@ -2,11 +2,15 @@ training:
   data:
     batch_size: 16
     num_workers: 0
-    pin_memory: false
+    pin_memory: true
+    persistent_workers: true
+    prefetch_factor_train: 4
+    prefetch_factor_val: 2
     shuffle_train: true
     drop_last_train: false
     shuffle_val: false
     drop_last_val: false
+
 
   device:
     accelerator: "auto"

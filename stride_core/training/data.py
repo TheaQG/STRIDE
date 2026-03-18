@@ -56,6 +56,9 @@ class TrainingDataConfig:
     num_workers: int
 
     pin_memory: bool
+    persistent_workers: bool
+    prefetch_factor_train: int | None
+    prefetch_factor_val: int | None
 
     shuffle_train: bool
     drop_last_train: bool
@@ -123,6 +126,11 @@ class TrainingDataConfig:
         batch_size = int(data_cfg.get("batch_size", 1))
         num_workers = int(data_cfg.get("num_workers", 0))
 
+        pin_memory = bool(data_cfg.get("pin_memory", False))
+        persistent_workers = bool(data_cfg.get("persistent_workers", num_workers > 0))
+        prefetch_factor_train = data_cfg.get("prefetch_factor_train", None)
+        prefetch_factor_val = data_cfg.get("prefetch_factor_val", None)
+
         if batch_size <= 0:
             raise ValueError(f"batch_size must be positive, got {batch_size}")
 
@@ -133,7 +141,14 @@ class TrainingDataConfig:
             dataset_config_path=dataset_config_path,
             batch_size=batch_size,
             num_workers=num_workers,
-            pin_memory=bool(data_cfg.get("pin_memory", False)),
+            pin_memory=pin_memory,
+            persistent_workers=persistent_workers,
+            prefetch_factor_train=(
+                None if prefetch_factor_train is None else int(prefetch_factor_train)
+            ),
+            prefetch_factor_val=(
+                None if prefetch_factor_val is None else int(prefetch_factor_val)
+            ),
             shuffle_train=bool(data_cfg.get("shuffle_train", True)),
             drop_last_train=bool(data_cfg.get("drop_last_train", False)),
             shuffle_val=bool(data_cfg.get("shuffle_val", False)),
@@ -323,19 +338,28 @@ def build_dataloader(
     num_workers: int,
     pin_memory: bool,
     drop_last: bool,
+    persistent_workers: bool,
+    prefetch_factor: int | None,
 ) -> DataLoader[Any]:
     """
     Build a PyTorch DataLoader with STRIDE collate logic.
     """
-    return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-        drop_last=drop_last,
-        collate_fn=stride_collate_fn,
-    )
+    loader_kwargs: dict[str, Any] = {
+        "dataset": dataset,
+        "batch_size": batch_size,
+        "shuffle": shuffle,
+        "num_workers": num_workers,
+        "pin_memory": pin_memory,
+        "drop_last": drop_last,
+        "collate_fn": stride_collate_fn,
+    }
+
+    if num_workers > 0:
+        loader_kwargs["persistent_workers"] = persistent_workers
+        if prefetch_factor is not None:
+            loader_kwargs["prefetch_factor"] = prefetch_factor
+
+    return DataLoader(**loader_kwargs)
 
 
 
@@ -373,6 +397,8 @@ def build_training_data(training_config_path: str | Path) -> BuiltTrainingData:
         num_workers=training_data_cfg.num_workers,
         pin_memory=training_data_cfg.pin_memory,
         drop_last=training_data_cfg.drop_last_train,
+        persistent_workers=training_data_cfg.persistent_workers,
+        prefetch_factor=training_data_cfg.prefetch_factor_train,
     )
 
     val_loader = build_dataloader(
@@ -382,6 +408,8 @@ def build_training_data(training_config_path: str | Path) -> BuiltTrainingData:
         num_workers=training_data_cfg.num_workers,
         pin_memory=training_data_cfg.pin_memory,
         drop_last=training_data_cfg.drop_last_val,
+        persistent_workers=training_data_cfg.persistent_workers,
+        prefetch_factor=training_data_cfg.prefetch_factor_val,
     )
 
     return BuiltTrainingData(
