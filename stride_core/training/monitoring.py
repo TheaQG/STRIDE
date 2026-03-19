@@ -33,6 +33,7 @@ from typing import Any
 
 import matplotlib.pyplot as plt
 import numpy as np
+import torch
 
 
 # -----------------------------------------------------------------------------
@@ -137,7 +138,10 @@ class MonitoringConfig:
 
 
 def _to_numpy_2d_or_3d(value: Any, name: str) -> np.ndarray:
-    array = np.asarray(value, dtype=np.float64)
+    if isinstance(value, torch.Tensor):
+        array = value.detach().cpu().numpy().astype(np.float64, copy=False)
+    else:
+        array = np.asarray(value, dtype=np.float64)
     if array.ndim not in {2, 3, 4}:
         raise ValueError(f"{name} must have ndim in {{2, 3, 4}}, got {array.ndim}")
     return array

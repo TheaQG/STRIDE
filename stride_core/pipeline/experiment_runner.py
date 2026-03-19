@@ -72,14 +72,13 @@ class ExperimentRunner:
         self.repo_root = self._infer_repo_root()
         self.logger = logging.getLogger(__name__)
 
-        self.logs_dir = (
-            self.repo_root / "runs" / "pipeline_logs" / self.cfg.meta.name
-        )
-        self.logs_dir.mkdir(parents=True, exist_ok=True)
-
-        # compile configs
+        # compile configs first (so we know experiment_root)
         compiler = ConfigCompiler(cfg)
         self.compiled = compiler.compile()
+
+        # logs live inside the compiled experiment root
+        self.logs_dir = self.compiled.experiment_root / "logs"
+        self.logs_dir.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
     # Public entrypoint

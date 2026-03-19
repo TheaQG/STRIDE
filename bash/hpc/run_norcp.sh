@@ -36,6 +36,7 @@ USER_BASE="/scratch/${ACCOUNT}/${USER}"
 
 ROOT_DIR="${ROOT_DIR:-${USER_BASE}/Code/STRIDE}"
 STRIDE_RUNS="${STRIDE_RUNS:-${USER_BASE}/runs/STRIDE}"
+
 DATA_BASE="${DATA_BASE:-${USER_BASE}/Data}"
 NORCP_DATA_DIR="${NORCP_DATA_DIR:-${DATA_BASE}/NorCP/cropped}"
 
@@ -112,6 +113,13 @@ if [ ! -d "${ROOT_DIR}" ]; then
   echo "[ERROR] ROOT_DIR not found: ${ROOT_DIR}" >&2
   exit 1
 fi
+
+if [ -z "${STRIDE_RUNS}" ]; then
+  echo "[ERROR] STRIDE_RUNS is empty." >&2
+  exit 1
+fi
+
+mkdir -p "${STRIDE_RUNS}"
 
 if [ ! -d "${NORCP_DATA_DIR}" ]; then
   echo "[ERROR] NORCP_DATA_DIR does not exist: ${NORCP_DATA_DIR}" >&2

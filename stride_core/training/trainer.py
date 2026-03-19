@@ -241,7 +241,9 @@ class Trainer:
         self.cfg = TrainingRunConfig.from_yaml(training_config_path)
 
         self.device = self._resolve_device(self.cfg.accelerator)
-        self.use_amp = self.device.type == "cuda"
+        # Disable AMP for now. On the current LUMI setup this has shown unstable
+        # behaviour leading to non-finite losses during EDM training.
+        self.use_amp = False
         self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
         if self.device.type == "cuda":
             torch.backends.cudnn.benchmark = True
@@ -418,8 +420,16 @@ class Trainer:
                     raise ValueError(
                         f"Expected scalar loss, got shape {tuple(loss.shape)}"
                     )
+                if not torch.isfinite(loss):
+                    raise RuntimeError(
+                        "Encountered non-finite training loss "
+                        f"at epoch={epoch + 1}, batch_idx={batch_idx}, global_step={self.global_step}"
+                    )
 
             self.scaler.scale(loss).backward()
+            if self.use_amp:
+                self.scaler.unscale_(self.optimizer)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
             self.scaler.step(self.optimizer)
             self.scaler.update()
 
@@ -483,6 +493,11 @@ class Trainer:
                 if loss.ndim != 0:
                     raise ValueError(
                         f"Expected scalar loss, got shape {tuple(loss.shape)}"
+                    )
+                if not torch.isfinite(loss):
+                    raise RuntimeError(
+                        "Encountered non-finite validation loss "
+                        f"at epoch={epoch + 1}, batch_idx={batch_idx}"
                     )
 
             loss_value = float(loss.item())
