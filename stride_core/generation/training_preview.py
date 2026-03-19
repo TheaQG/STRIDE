@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -223,6 +223,47 @@ def _maybe_get_lsm_overlay(preview_payload: dict[str, Any]) -> np.ndarray | None
     return tensor_to_numpy(source[:, lsm_idx : lsm_idx + 1, :, :])
 
 
+def _prefer_physical_preview_tensor(
+    preview_payload: dict[str, Any],
+    physical_key: str,
+    fallback_key: str,
+) -> Any:
+    value = preview_payload.get(physical_key)
+    if value is not None:
+        return value
+    return preview_payload.get(fallback_key)
+
+
+
+def _upsample_preview_condition_to_target(
+    array: np.ndarray | None,
+    *,
+    target_hw: tuple[int, int],
+    mode: str = "nearest",
+) -> np.ndarray | None:
+    """
+    Upsample LR conditioning fields for preview visualization only.
+    This must never affect the actual model inputs.
+    """
+    if array is None:
+        return None
+
+    arr = np.asarray(array)
+    if arr.ndim != 4:
+        return arr
+
+    if tuple(arr.shape[-2:]) == tuple(target_hw):
+        return arr
+
+    tensor = torch.from_numpy(arr).float()
+    upsampled = torch.nn.functional.interpolate(
+        tensor,
+        size=target_hw,
+        mode=mode,
+    )
+    return upsampled.cpu().numpy()
+
+
 # -----------------------------------------------------------------------------
 # Figure creation
 # -----------------------------------------------------------------------------
@@ -237,19 +278,18 @@ def save_training_preview_figure(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    target_tensor = preview_payload.get("target_physical")
-    generated_tensor = preview_payload.get("generated_physical")
-    cond_dynamic_tensor = preview_payload.get("cond_dynamic_physical")
-    cond_static_tensor = preview_payload.get("cond_static_physical")
-
-    if not isinstance(target_tensor, torch.Tensor):
-        target_tensor = preview_payload.get("target")
-    if not isinstance(generated_tensor, torch.Tensor):
-        generated_tensor = preview_payload.get("generated")
-    if not isinstance(cond_dynamic_tensor, torch.Tensor):
-        cond_dynamic_tensor = preview_payload.get("cond_dynamic")
-    if not isinstance(cond_static_tensor, torch.Tensor):
-        cond_static_tensor = preview_payload.get("cond_static")
+    target_tensor = _prefer_physical_preview_tensor(
+        preview_payload, "target_physical", "target"
+    )
+    generated_tensor = _prefer_physical_preview_tensor(
+        preview_payload, "generated_physical", "generated"
+    )
+    cond_dynamic_tensor = _prefer_physical_preview_tensor(
+        preview_payload, "cond_dynamic_physical", "cond_dynamic"
+    )
+    cond_static_tensor = _prefer_physical_preview_tensor(
+        preview_payload, "cond_static_physical", "cond_static"
+    )
 
     target = tensor_to_numpy(target_tensor)
     generated_np = tensor_to_numpy(generated_tensor)
@@ -258,6 +298,13 @@ def save_training_preview_figure(
 
     if target is None or generated_np is None:
         raise ValueError("target and generated must not be None")
+
+    target_hw = tuple(target.shape[-2:])
+    cond_dynamic = _upsample_preview_condition_to_target(
+        cond_dynamic,
+        target_hw=cast(tuple[int, int], target_hw),
+        mode="nearest",
+    )
 
     variable_names = preview_payload.get("variable_names", {})
     if not isinstance(variable_names, dict):
@@ -316,12 +363,16 @@ def save_training_preview_figure(
         row1_panels: list[tuple[np.ndarray, str, bool]] = [
             (
                 gen_img,
-                "generated" if target_name is None else f"generated: {target_name}",
+                "generated (physical)"
+                if target_name is None
+                else f"generated: {target_name} (physical)",
                 True,
             ),
             (
                 target_img,
-                "target" if target_name is None else f"target: {target_name}",
+                "target (physical)"
+                if target_name is None
+                else f"target: {target_name} (physical)",
                 True,
             ),
         ]
@@ -329,7 +380,9 @@ def save_training_preview_figure(
             row1_panels.append(
                 (
                     cond_match_img,
-                    "LR cond" if target_name is None else f"LR cond: {target_name}",
+                    "LR cond (physical, upsampled)"
+                    if target_name is None
+                    else f"LR cond: {target_name} (physical, upsampled)",
                     True,
                 )
             )
@@ -356,7 +409,7 @@ def save_training_preview_figure(
                 plot_field_with_colorbar_and_optional_boxplot(
                     axes[row_offset + 1, col_idx],
                     img,
-                    title=f"cond: {name}",
+                    title=f"cond: {name} (physical, upsampled)",
                     cmap=get_variable_cmap(name),
                     lsm_overlay=lsm_overlay_case,
                     add_boxplot=True,
@@ -375,7 +428,7 @@ def save_training_preview_figure(
                 plot_field_with_colorbar_and_optional_boxplot(
                     axes[row_offset + 2, col_idx],
                     img,
-                    title=name,
+                    title=f"{name} (physical)",
                     cmap=get_variable_cmap(name),
                     lsm_overlay=None if str(name).lower() == "lsm" else lsm_overlay_case,
                     add_boxplot=False,
