@@ -1,6 +1,6 @@
 experiment:
   name: pipeline_norcp
-  output_root: runs/pipeline_norcp
+  output_root: ${STRIDE_RUNS}
   seed: 42
 
 stages:

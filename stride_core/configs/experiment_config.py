@@ -24,6 +24,7 @@ Design principles
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import os
 from pathlib import Path
 from typing import Any
 
@@ -35,7 +36,6 @@ import yaml
 # -----------------------------------------------------------------------------
 
 
-
 def _require_dict(value: Any, name: str) -> dict[str, Any]:
     if value is None:
         return {}
@@ -44,12 +44,28 @@ def _require_dict(value: Any, name: str) -> dict[str, Any]:
     return value
 
 
+# Expand environment variables in a value, error if unresolved
+def _expand_env_vars(raw_value: Any) -> Any:
+    if raw_value is None:
+        return None
+    if not isinstance(raw_value, str):
+        return raw_value
+
+    expanded = os.path.expandvars(raw_value)
+    if "$" in expanded:
+        raise ValueError(
+            "Unresolved environment variable in path value: "
+            f"{raw_value!r} -> {expanded!r}"
+        )
+    return expanded
+
 
 def _resolve_path(raw_path: Any, *, config_path: Path) -> Path | None:
+    raw_path = _expand_env_vars(raw_path)
     if raw_path is None:
         return None
 
-    path = Path(str(raw_path))
+    path = Path(str(raw_path)).expanduser()
     if path.is_absolute():
         return path.resolve()
 
