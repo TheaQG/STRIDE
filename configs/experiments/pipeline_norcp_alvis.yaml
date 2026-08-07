@@ -1,0 +1,105 @@
+experiment:
+  name: pipeline_norcp
+  output_root: runs/pipeline_norcp
+  seed: 42
+
+stages:
+  training: true
+  generation: true
+  evaluation: true
+
+bases:
+  model: configs/models/edm_model_base.yaml
+  training: configs/training/training_base.yaml
+  generation: configs/generation/generation_base.yaml
+  sampler: configs/generation/sampler_base.yaml
+  evaluation: configs/evaluation/evaluation_base.yaml
+  data: configs/datasets/norcp_alvis.yaml
+
+data:
+  target:
+    variable: prcp
+    transform: log1p
+    output_shape: [92, 68]
+
+  conditioning:
+    dynamic_variables: [prcp, temp]
+    static_variables: [topo]
+    input_shape: [23, 17]
+
+  domain:
+    hr_size: [92, 68]
+    lr_size: [23, 17]
+    large_domain: false
+
+  split:
+    train: null
+    val: null
+    test: null
+    
+    statistics: # which split to use for computing data statistics (e.g. mean, std) used for normalization; if null, use training split
+      train: train
+      val: train
+      test: train
+
+  overrides:
+    domain:
+      spatial_shuffle:
+        enabled: false
+        train_only: true
+        cutout_domain: [170, 350, 340, 520]
+
+training:
+  run_name: train_norcp
+  overrides:
+    loop:
+      max_epochs: 50
+  
+model:
+  overrides:
+    in_dynamic_channels: 2
+    in_static_channels: 1
+    out_channels: 1
+
+    spatial:
+      target_height: 92
+      target_width: 68
+      cond_height: 23
+      cond_width: 17
+      align_cond_to_target: true
+      cond_upsample_mode: bilinear
+
+    rain_gate:
+      model:
+        enabled: true
+        hidden_channels: 32
+        num_blocks: 3
+        input_mode: "cond"
+      loss:
+        enabled: false
+        loss_weight: 0.1
+        wet_threshold_mm: 0.1
+        target_variable: "prcp"
+        use_loss_reweighting: false
+        reweight_detach: true
+        reweight_power: 1.0
+
+
+generation:
+  run_name: generate_norcp
+  overrides:
+    generation_run:
+      data:
+        split: test
+        batch_size: 50 # set to 50 to speed up generation for testing purposes; can be increased for final runs
+
+
+evaluation:
+  run_name: evaluate_norcp
+  overrides:
+    evaluation_run:
+      data:
+        split: test
+        forecast_product_for_spatial: pmm
+        forecast_product_for_climatology: pmm
+        forecast_product_for_temporal: pmm
