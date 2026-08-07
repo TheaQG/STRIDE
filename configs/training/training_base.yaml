@@ -16,7 +16,7 @@ training:
     accelerator: "auto"
 
   loop:
-    max_epochs: 500
+    max_epochs: 50
     max_train_batches: null
     max_val_batches: null
     validate_every_n_epochs: 1
