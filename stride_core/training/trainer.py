@@ -411,6 +411,9 @@ class Trainer:
 
 
     def train_epoch(self, epoch: int) -> dict[str, float]:
+        if self.data.train_sampler is not None:
+            self.data.train_sampler.set_epoch(epoch)
+
         self.model.train()
 
         total_loss = 0.0
@@ -481,6 +484,12 @@ class Trainer:
         if num_batches == 0:
             raise RuntimeError("No training batches were processed")
 
+        total_loss, num_batches = _reduce_loss_totals(
+            total_loss,
+            num_batches,
+            device=self.device,
+        )
+
         return {
             "loss": total_loss / num_batches,
             "num_batches": float(num_batches),
@@ -488,6 +497,9 @@ class Trainer:
 
     @torch.no_grad()
     def validate_epoch(self, epoch: int) -> dict[str, float]:
+        if self.data.val_sampler is not None:
+            self.data.val_sampler.set_epoch(epoch)
+
         eval_model = self.model
         if self.ema is not None:
             eval_model = self.ema.clone_model(unwrap_model(self.model)).to(
@@ -544,6 +556,12 @@ class Trainer:
 
         if num_batches == 0:
             raise RuntimeError("No validation batches were processed")
+
+        total_loss, num_batches = _reduce_loss_totals(
+            total_loss,
+            num_batches,
+            device=self.device,
+        )
 
         return {
             "loss": total_loss / num_batches,
@@ -979,3 +997,25 @@ def _wrap_model_for_distributed(
         ddp_kwargs["output_device"] = device.index
 
     return DistributedDataParallel(model, **ddp_kwargs)
+
+
+def _reduce_loss_totals(
+    total_loss: float,
+    num_batches: int,
+    *,
+    device: torch.device,
+) -> tuple[float, int]:
+    if not is_distributed():
+        return total_loss, num_batches
+    if not dist.is_available() or not dist.is_initialized():
+        raise RuntimeError(
+            "Distributed runtime was detected before the process group was initialized"
+        )
+
+    totals = torch.tensor(
+        [total_loss, float(num_batches)],
+        dtype=torch.float64,
+        device=device,
+    )
+    dist.all_reduce(totals, op=dist.ReduceOp.SUM)
+    return float(totals[0].item()), int(totals[1].item())
