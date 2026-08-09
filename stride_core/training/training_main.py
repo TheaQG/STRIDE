@@ -148,7 +148,8 @@ def main() -> None:
             log_file = shared_log_file.with_name(
                 f"{shared_log_file.stem}_rank_{rank():04d}{shared_log_file.suffix}"
             )
-        setup_logging(log_file)
+        log_level = logging.INFO if is_main_process() else logging.WARNING
+        setup_logging(log_file, level=log_level)
 
         line = "=" * len("STRIDE training main")
         logger.info(f"\n{line}\nSTRIDE training main\n{line}")

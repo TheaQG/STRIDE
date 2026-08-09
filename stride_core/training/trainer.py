@@ -57,7 +57,13 @@ from stride_core.training.optim import (
     build_optimizer,
     build_scheduler,
 )
-from stride_core.utils.distributed import is_distributed, local_rank, unwrap_model
+from stride_core.utils.distributed import (
+    barrier,
+    is_distributed,
+    is_main_process,
+    local_rank,
+    unwrap_model,
+)
 
 from stride_core.training.training_logging import (
     TrainingHistory,
@@ -254,6 +260,7 @@ class Trainer:
 
     def __init__(self, training_config_path: str | Path) -> None:
         self.cfg = TrainingRunConfig.from_yaml(training_config_path)
+        self.is_main_process = is_main_process()
 
         self.device = self._resolve_device(self.cfg.accelerator)
         # Disable AMP for now. On the current LUMI setup this has shown unstable
@@ -337,21 +344,23 @@ class Trainer:
         """
         Run the full training loop.
         """
-        self._print_run_summary()
+        if self.is_main_process:
+            self._print_run_summary()
 
         start_epoch = self.current_epoch
         for epoch in range(start_epoch, self.cfg.max_epochs):
             self.current_epoch = epoch
 
             train_metrics = self.train_epoch(epoch)
-            self._print_epoch_summary("train", epoch, train_metrics)
-            self.history.add_train_epoch(
-                epoch + 1,
-                {
-                    **train_metrics,
-                    "lr": self._get_current_lr(),
-                },
-            )
+            if self.is_main_process:
+                self._print_epoch_summary("train", epoch, train_metrics)
+                self.history.add_train_epoch(
+                    epoch + 1,
+                    {
+                        **train_metrics,
+                        "lr": self._get_current_lr(),
+                    },
+                )
 
             val_metrics: dict[str, float] | None = None
             improved_val = False
@@ -359,20 +368,21 @@ class Trainer:
             if do_validate:
                 val_metrics = self.validate_epoch(epoch)
                 improved_val = self._update_best_val_loss(val_metrics["loss"])
-                self._print_epoch_summary(
-                    "valid",
-                    epoch,
-                    val_metrics,
-                    improved=improved_val,
-                )
-                self.history.add_valid_epoch(
-                    epoch + 1,
-                    {
-                        **val_metrics,
-                        "improved": improved_val,
-                        "best_val_loss": self.best_val_loss,
-                    },
-                )
+                if self.is_main_process:
+                    self._print_epoch_summary(
+                        "valid",
+                        epoch,
+                        val_metrics,
+                        improved=improved_val,
+                    )
+                    self.history.add_valid_epoch(
+                        epoch + 1,
+                        {
+                            **val_metrics,
+                            "improved": improved_val,
+                            "best_val_loss": self.best_val_loss,
+                        },
+                    )
                 self._step_scheduler_after_validation(val_metrics["loss"])
             else:
                 self._step_scheduler_without_metric()
@@ -385,7 +395,7 @@ class Trainer:
             )
 
             preview_result: dict[str, Any] | None = None
-            if should_run_training_preview(
+            if self.is_main_process and should_run_training_preview(
                 epoch=epoch,
                 improved_val=improved_val,
                 preview_config=self.preview_config,
@@ -403,11 +413,17 @@ class Trainer:
                 preview_metrics = self._compute_preview_metrics(preview_result)
                 self._attach_preview_metrics_to_last_valid_history(preview_metrics)
 
-            if self.cfg.save_history_json:
+            if self.is_main_process and self.cfg.save_history_json:
                 self.history.save_json(self.history_path)
 
-            if self.monitoring_config.enabled and self.monitoring_config.save_history_plots:
+            if (
+                self.is_main_process
+                and self.monitoring_config.enabled
+                and self.monitoring_config.save_history_plots
+            ):
                 self._save_monitoring_history_plots()
+
+            barrier()
 
 
     def train_epoch(self, epoch: int) -> dict[str, float]:
@@ -428,7 +444,11 @@ class Trainer:
 
             batch = self._move_batch_to_device(batch, self.device)
 
-            if self.cfg.log_batch_shapes_once and not self._did_log_batch_shapes:
+            if (
+                self.is_main_process
+                and self.cfg.log_batch_shapes_once
+                and not self._did_log_batch_shapes
+            ):
                 self._print_batch_overview(batch)
                 self._did_log_batch_shapes = True
 
@@ -466,7 +486,8 @@ class Trainer:
             self.global_step += 1
 
             should_print_step = (
-                self.cfg.print_step_progress
+                self.is_main_process
+                and self.cfg.print_step_progress
                 and self.cfg.print_every_n_steps is not None
                 and self.cfg.print_every_n_steps > 0
                 and self.global_step % self.cfg.print_every_n_steps == 0
@@ -540,7 +561,8 @@ class Trainer:
             num_batches += 1
 
             should_print_step = (
-                self.cfg.print_step_progress
+                self.is_main_process
+                and self.cfg.print_step_progress
                 and self.cfg.print_every_n_steps is not None
                 and self.cfg.print_every_n_steps > 0
             )
@@ -593,14 +615,15 @@ class Trainer:
         self.global_step = loaded.global_step
         self.best_val_loss = loaded.best_val_loss
 
-        log_run_setup(
-            [
-                f"Resumed checkpoint: {loaded.checkpoint_path}",
-                f"Resumed epoch:      {loaded.epoch}",
-                f"Resumed global_step:{loaded.global_step}",
-                f"Resumed best_val:   {loaded.best_val_loss}",
-            ]
-        )
+        if self.is_main_process:
+            log_run_setup(
+                [
+                    f"Resumed checkpoint: {loaded.checkpoint_path}",
+                    f"Resumed epoch:      {loaded.epoch}",
+                    f"Resumed global_step:{loaded.global_step}",
+                    f"Resumed best_val:   {loaded.best_val_loss}",
+                ]
+            )
 
     def _checkpoint_if_needed(
         self,
@@ -610,7 +633,7 @@ class Trainer:
         *,
         improved_val: bool,
     ) -> None:
-        if not self.checkpoint_config.enabled:
+        if not self.is_main_process or not self.checkpoint_config.enabled:
             return
 
         checkpoint_kwargs = {
