@@ -911,9 +911,8 @@ class ConfigCompiler:
         # misleading because Trainer builds from `configs.model_config`.
         training_overrides.pop("model", None)
 
-        self._deep_update(config, training_overrides)
-
         training_cfg = config["training"]
+        self._deep_update(training_cfg, training_overrides)
 
         # ------------------------------------------------------------------
         # Resolve DataLoader workers from environment (HPC-friendly)

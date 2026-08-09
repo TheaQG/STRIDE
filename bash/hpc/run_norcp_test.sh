@@ -2,7 +2,7 @@
 #SBATCH --job-name=stride_norcp_test
 #SBATCH --output=logs/slurm_%x_%j.log
 #SBATCH --error=logs/slurm_%x_%j.err
-#SBATCH --account=project_465002493
+#SBATCH --account=project_465002737
 #SBATCH --partition=standard-g
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=8
@@ -34,7 +34,7 @@ set -eo pipefail
 # -----------------------------------------------------------------------------
 
 # --- User/site configuration (override when submitting) ---
-ACCOUNT="${SLURM_JOB_ACCOUNT:-${ACCOUNT:-project_465002493}}"
+ACCOUNT="project_465002493" # "${SLURM_JOB_ACCOUNT:-${ACCOUNT:-project_465002493}}"
 USER_BASE="/scratch/${ACCOUNT}/${USER}"
 
 ROOT_DIR="${ROOT_DIR:-${USER_BASE}/Code/STRIDE}"
