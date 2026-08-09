@@ -931,8 +931,18 @@ class ConfigCompiler:
             if env_workers is not None:
                 try:
                     env_workers_int = int(env_workers)
-                    # Leave a couple of CPUs for main process / overhead
-                    resolved_workers = max(1, env_workers_int - 2)
+                    train_processes = int(
+                        os.environ.get("STRIDE_TRAIN_NPROC", "1")
+                    )
+                    if train_processes <= 0:
+                        raise ValueError("STRIDE_TRAIN_NPROC must be positive")
+
+                    if train_processes == 1:
+                        # Leave a couple of CPUs for the main process / overhead.
+                        resolved_workers = max(1, env_workers_int - 2)
+                    else:
+                        cpus_per_process = env_workers_int // train_processes
+                        resolved_workers = max(0, cpus_per_process - 1)
                 except Exception:
                     resolved_workers = 0
             else:

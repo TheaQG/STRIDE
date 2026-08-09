@@ -5,6 +5,7 @@
 #SBATCH --account=project_465002493
 #SBATCH --partition=standard-g
 #SBATCH --nodes=1
+#SBATCH --ntasks=1
 #SBATCH --gpus-per-node=8
 #SBATCH --cpus-per-task=56
 #SBATCH --mem=60G
@@ -16,7 +17,9 @@ set -eo pipefail
 # STRIDE NorCP full pipeline run on LUMI (inside container)
 #
 # Default behaviour:
-#   - runs launch_pipeline.py directly from a single experiment config
+#   - launches one pipeline task
+#   - runs training with one process per GPU
+#   - runs generation and evaluation once after training
 #
 # Example submit:
 # sbatch --account=project_465002493 \
@@ -29,6 +32,7 @@ set -eo pipefail
 #   OVERLAY_IMG=/scratch/project_465002493/containers/overlays/my_overlay.img
 #   STRIDE_RUNS=/scratch/project_465002493/$USER/runs/STRIDE
 #   NORCP_DATA_DIR=/scratch/project_465002493/$USER/Data/NorCP/cropped
+#   STRIDE_TRAIN_NPROC=8
 # -----------------------------------------------------------------------------
 
 ACCOUNT="${SLURM_JOB_ACCOUNT:-${ACCOUNT:-project_465002493}}"
@@ -48,9 +52,21 @@ CONFIG_REL="${CONFIG_REL:-configs/experiments/pipeline_norcp.yaml}"
 RUN_NAME="${RUN_NAME:-stride_norcp_full}"
 RUN_ROOT="${RUN_ROOT:-${STRIDE_RUNS}/${RUN_NAME}}"
 LOG_DIR="${LOG_DIR:-${RUN_ROOT}/logs}"
+STRIDE_TRAIN_NPROC="${STRIDE_TRAIN_NPROC:-8}"
+
+if ! [[ "${STRIDE_TRAIN_NPROC}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "[ERROR] STRIDE_TRAIN_NPROC must be a positive integer." >&2
+  exit 1
+fi
+
+TRAIN_CPU_THREADS=$((SLURM_CPUS_PER_TASK / STRIDE_TRAIN_NPROC))
+if [ "${TRAIN_CPU_THREADS}" -lt 1 ]; then
+  TRAIN_CPU_THREADS=1
+fi
 
 export ACCOUNT USER_BASE ROOT_DIR STRIDE_RUNS DATA_BASE NORCP_DATA_DIR
 export CONTAINER OVERLAY_IMG USE_OVERLAY CONFIG_REL RUN_NAME RUN_ROOT LOG_DIR
+export STRIDE_TRAIN_NPROC TRAIN_CPU_THREADS
 
 set -u
 
@@ -65,9 +81,10 @@ mkdir -p logs
 mkdir -p "${LOG_DIR}"
 
 # --- Threading caps ---
-export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK}"
-export MKL_NUM_THREADS="${SLURM_CPUS_PER_TASK}"
-export OPENBLAS_NUM_THREADS="${SLURM_CPUS_PER_TASK}"
+export OMP_NUM_THREADS="${TRAIN_CPU_THREADS}"
+export MKL_NUM_THREADS="${TRAIN_CPU_THREADS}"
+export OPENBLAS_NUM_THREADS="${TRAIN_CPU_THREADS}"
+export PYTHONUNBUFFERED=1
 
 # --- MIOpen workaround ---
 SCRATCH="/scratch/${SLURM_JOB_ACCOUNT}"
@@ -103,6 +120,8 @@ echo "[INFO] CONTAINER       = ${CONTAINER}"
 echo "[INFO] OVERLAY_IMG     = ${OVERLAY_IMG}"
 echo "[INFO] USE_OVERLAY     = ${USE_OVERLAY}"
 echo "[INFO] CONFIG          = ${CFG}"
+echo "[INFO] TRAIN_NPROC     = ${STRIDE_TRAIN_NPROC}"
+echo "[INFO] CPU_THREADS/RANK= ${TRAIN_CPU_THREADS}"
 
 if [ ! -f "${CFG}" ]; then
   echo "[ERROR] Config not found: ${CFG}" >&2
@@ -129,7 +148,8 @@ fi
 
 echo "[INFO] Running STRIDE NorCP full pipeline inside container..."
 
-srun singularity exec "${SINGULARITY_ARGS[@]}" "${CONTAINER}" bash -lc "
+srun --ntasks=1 --gpus-per-task="${STRIDE_TRAIN_NPROC}" \
+  singularity exec "${SINGULARITY_ARGS[@]}" "${CONTAINER}" bash -lc "
   set -euo pipefail
   export PYTHONPATH='${PYTHONPATH}'
   export ROOT_DIR='${ROOT_DIR}'
@@ -137,6 +157,11 @@ srun singularity exec "${SINGULARITY_ARGS[@]}" "${CONTAINER}" bash -lc "
   export NORCP_DATA_DIR='${NORCP_DATA_DIR}'
   export RUN_ROOT='${RUN_ROOT}'
   export LOG_DIR='${LOG_DIR}'
+  export STRIDE_TRAIN_NPROC='${STRIDE_TRAIN_NPROC}'
+  export OMP_NUM_THREADS='${OMP_NUM_THREADS}'
+  export MKL_NUM_THREADS='${MKL_NUM_THREADS}'
+  export OPENBLAS_NUM_THREADS='${OPENBLAS_NUM_THREADS}'
+  export PYTHONUNBUFFERED=1
   cd '${ROOT_DIR}'
 
   BASE_PYTHON=\"\$(command -v python)\"
