@@ -73,11 +73,40 @@ def is_main_process() -> bool:
 
 
 # Distributed training helper, initialize process group
-def initialize(backend: str | None = None) -> None:
+def initialize(
+    *,
+    enabled: str | bool = "auto",
+    backend: str | None = None,
+) -> None:
     """Initialize a process group when a multi-process launcher is detected."""
     _copy_slurm_environment()
 
-    if world_size() <= 1 or (dist.is_available() and dist.is_initialized()):
+    if isinstance(enabled, str):
+        enabled = enabled.lower()
+        if enabled not in {"auto", "true", "false"}:
+            raise ValueError("enabled must be 'auto', true, or false")
+    elif not isinstance(enabled, bool):
+        raise TypeError("enabled must be 'auto', true, or false")
+
+    launched = world_size() > 1
+    explicitly_disabled = enabled is False or enabled == "false"
+    explicitly_enabled = enabled is True or enabled == "true"
+
+    if explicitly_disabled:
+        if launched:
+            raise RuntimeError(
+                "A multi-process launcher was detected, but distributed training is disabled"
+            )
+        return
+
+    if not launched:
+        if explicitly_enabled:
+            raise RuntimeError(
+                "Distributed training is enabled, but no multi-process launcher was detected"
+            )
+        return
+
+    if dist.is_available() and dist.is_initialized():
         return
     if not dist.is_available():
         raise RuntimeError("torch.distributed is not available in this PyTorch build")
@@ -88,6 +117,8 @@ def initialize(backend: str | None = None) -> None:
     if selected_backend == "nccl":
         if not dist.is_nccl_available():
             raise RuntimeError("The nccl distributed backend is not available")
+        if not torch.cuda.is_available():
+            raise RuntimeError("The nccl distributed backend requires CUDA/ROCm devices")
         torch.cuda.set_device(local_rank())
 
     os.environ.setdefault("MASTER_ADDR", "127.0.0.1")

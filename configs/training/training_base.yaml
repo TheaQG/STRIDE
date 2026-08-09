@@ -15,6 +15,12 @@ training:
   device:
     accelerator: "auto"
 
+  distributed:
+    enabled: auto
+    backend: nccl
+    sync_batchnorm: false
+    find_unused_parameters: false
+
   loop:
     max_epochs: 50
     max_train_batches: null

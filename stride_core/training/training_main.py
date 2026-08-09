@@ -100,6 +100,30 @@ def _resolve_experiment_root_from_training_config(training_config_path: Path) ->
     return training_config_path.resolve().parents[1]
 
 
+def _read_distributed_runtime_options(
+    training_config_path: Path,
+) -> tuple[str | bool, str]:
+    with open(training_config_path, "r", encoding="utf-8") as f:
+        payload = yaml.safe_load(f)
+
+    if not isinstance(payload, dict):
+        raise ValueError(
+            f"Expected training config to load into a dict, got {type(payload)}"
+        )
+
+    training_cfg = payload.get("training", {})
+    if not isinstance(training_cfg, dict):
+        raise ValueError("Expected 'training' section to be a dict")
+
+    distributed_cfg = training_cfg.get("distributed", {})
+    if not isinstance(distributed_cfg, dict):
+        raise ValueError("Expected 'training.distributed' to be a dict")
+
+    enabled = distributed_cfg.get("enabled", "auto")
+    backend = str(distributed_cfg.get("backend", "nccl"))
+    return enabled, backend
+
+
 def main() -> None:
     parser = build_arg_parser()
     args = parser.parse_args()
@@ -108,8 +132,12 @@ def main() -> None:
     if args.local_rank is not None:
         os.environ.setdefault("LOCAL_RANK", str(args.local_rank))
 
+    distributed_enabled, distributed_backend = _read_distributed_runtime_options(
+        training_config_path
+    )
+
     try:
-        initialize()
+        initialize(enabled=distributed_enabled, backend=distributed_backend)
 
         experiment_root = _resolve_experiment_root_from_training_config(
             training_config_path
