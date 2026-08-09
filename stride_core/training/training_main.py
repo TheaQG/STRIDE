@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 from pathlib import Path
 import sys
 
+import torch.distributed as dist
 import yaml
 
 
@@ -20,6 +22,15 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from stride_core.training.trainer import Trainer
+from stride_core.utils.distributed import (
+    cleanup,
+    initialize,
+    is_distributed,
+    is_main_process,
+    local_rank,
+    rank,
+    world_size,
+)
 from stride_core.utils.logging_utils import get_stage_log_file, setup_logging
 
 logger = logging.getLogger(__name__)
@@ -37,6 +48,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=str,
         default=str(DEFAULT_TRAINING_CONFIG),
         help="Path to the training YAML config.",
+    )
+    parser.add_argument(
+        "--local-rank",
+        "--local_rank",
+        dest="local_rank",
+        type=int,
+        default=None,
+        help="Node-local process rank supplied by a distributed launcher.",
     )
     return parser
 
@@ -86,21 +105,40 @@ def main() -> None:
     args = parser.parse_args()
 
     training_config_path = resolve_config_path(args.config)
-    experiment_root = _resolve_experiment_root_from_training_config(
-        training_config_path
-    )
-    log_file = get_stage_log_file(experiment_root, "training")
-    setup_logging(log_file)
+    if args.local_rank is not None:
+        os.environ.setdefault("LOCAL_RANK", str(args.local_rank))
 
-    line = "=" * len("STRIDE training main")
-    logger.info(f"\n{line}\nSTRIDE training main\n{line}")
-    logger.info(f"Repository root: {REPO_ROOT}")
-    logger.info(f"Training config: {training_config_path}")
-    logger.info(f"Experiment root: {experiment_root}")
-    logger.info(f"Training log file: {log_file}")
+    try:
+        initialize()
 
-    trainer = Trainer(training_config_path)
-    trainer.fit()
+        experiment_root = _resolve_experiment_root_from_training_config(
+            training_config_path
+        )
+        shared_log_file = get_stage_log_file(experiment_root, "training")
+        log_file = shared_log_file
+        if not is_main_process():
+            log_file = shared_log_file.with_name(
+                f"{shared_log_file.stem}_rank_{rank():04d}{shared_log_file.suffix}"
+            )
+        setup_logging(log_file)
+
+        line = "=" * len("STRIDE training main")
+        logger.info(f"\n{line}\nSTRIDE training main\n{line}")
+        logger.info(f"Repository root: {REPO_ROOT}")
+        logger.info(f"Training config: {training_config_path}")
+        logger.info(f"Experiment root: {experiment_root}")
+        logger.info(f"Training log file: {log_file}")
+        logger.info(
+            "Distributed runtime: "
+            f"enabled={is_distributed()} rank={rank()} "
+            f"local_rank={local_rank()} world_size={world_size()} "
+            f"backend={dist.get_backend() if dist.is_initialized() else None}"
+        )
+
+        trainer = Trainer(training_config_path)
+        trainer.fit()
+    finally:
+        cleanup()
 
 
 if __name__ == "__main__":
