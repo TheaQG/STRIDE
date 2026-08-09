@@ -270,7 +270,10 @@ class Trainer:
         if self.device.type == "cuda":
             torch.backends.cudnn.benchmark = True
             torch.backends.cudnn.deterministic = False
-        self.checkpoint_dir = ensure_checkpoint_dir(self.cfg.output_dir / "checkpoints")
+        self.checkpoint_dir = self.cfg.output_dir / "checkpoints"
+        if self.is_main_process:
+            ensure_checkpoint_dir(self.checkpoint_dir)
+        barrier()
 
         self._set_seed(self.cfg.seed)
 
@@ -595,6 +598,7 @@ class Trainer:
     # ------------------------------------------------------------------
 
     def _resume_if_requested(self) -> None:
+        barrier()
         resume_path = resolve_resume_checkpoint(
             self.checkpoint_config.resume_from,
             checkpoint_dir=self.checkpoint_dir,
@@ -614,6 +618,7 @@ class Trainer:
         self.current_epoch = loaded.epoch
         self.global_step = loaded.global_step
         self.best_val_loss = loaded.best_val_loss
+        barrier()
 
         if self.is_main_process:
             log_run_setup(

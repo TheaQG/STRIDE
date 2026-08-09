@@ -59,6 +59,7 @@ from torch.optim.lr_scheduler import LRScheduler, ReduceLROnPlateau
 import yaml
 
 from stride_core.training.ema import EMA
+from stride_core.utils.distributed import unwrap_model
 
 
 @dataclass(frozen=True)
@@ -226,7 +227,7 @@ def save_checkpoint(
         "best_val_loss": None if best_val_loss is None else float(best_val_loss),
         "config_paths": config_paths,
         "extra_state": {} if extra_state is None else dict(extra_state),
-        "model_state_dict": model.state_dict(),
+        "model_state_dict": unwrap_model(model).state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "scheduler_state_dict": None if scheduler is None else scheduler.state_dict(),
         "ema_state_dict": None if ema is None else ema.state_dict(),
@@ -289,7 +290,12 @@ def load_checkpoint(
     if "model_state_dict" not in checkpoint:
         raise KeyError("Checkpoint is missing required key 'model_state_dict'")
 
-    model.load_state_dict(checkpoint["model_state_dict"], strict=strict_model)
+    model_state_dict = checkpoint["model_state_dict"]
+    if not isinstance(model_state_dict, dict):
+        raise ValueError("Checkpoint key 'model_state_dict' must be a dict")
+
+    model_state_dict = _strip_parallel_prefix(model_state_dict)
+    unwrap_model(model).load_state_dict(model_state_dict, strict=strict_model)
 
     if optimizer is not None:
         optimizer_state = checkpoint.get("optimizer_state_dict")
@@ -376,3 +382,13 @@ def _maybe_str(value: str | Path | None) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def _strip_parallel_prefix(state_dict: dict[str, Any]) -> dict[str, Any]:
+    normalized = state_dict
+    while normalized and all(key.startswith("module.") for key in normalized):
+        normalized = {
+            key.removeprefix("module."): value
+            for key, value in normalized.items()
+        }
+    return normalized
