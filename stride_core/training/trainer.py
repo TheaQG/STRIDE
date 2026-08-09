@@ -34,6 +34,8 @@ from pathlib import Path
 from typing import Any
 
 import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel
 import yaml
 
 from stride_core.configs.model_config import ModelSpec
@@ -55,6 +57,7 @@ from stride_core.training.optim import (
     build_optimizer,
     build_scheduler,
 )
+from stride_core.utils.distributed import is_distributed, local_rank, unwrap_model
 
 from stride_core.training.training_logging import (
     TrainingHistory,
@@ -102,6 +105,8 @@ class TrainingRunConfig:
     generation_config_path: Path | None
 
     accelerator: str
+    sync_batchnorm: bool
+    find_unused_parameters: bool
 
     max_epochs: int
     max_train_batches: int | None
@@ -142,6 +147,7 @@ class TrainingRunConfig:
         run_cfg = training_cfg.get("run", {})
         configs_cfg = training_cfg.get("configs", {})
         device_cfg = training_cfg.get("device", {})
+        distributed_cfg = training_cfg.get("distributed", {})
         loop_cfg = training_cfg.get("loop", {})
         logging_cfg = training_cfg.get("logging", {})
 
@@ -151,6 +157,8 @@ class TrainingRunConfig:
             raise ValueError("Expected 'training.configs' to be a dict")
         if not isinstance(device_cfg, dict):
             raise ValueError("Expected 'training.device' to be a dict")
+        if not isinstance(distributed_cfg, dict):
+            raise ValueError("Expected 'training.distributed' to be a dict")
         if not isinstance(loop_cfg, dict):
             raise ValueError("Expected 'training.loop' to be a dict")
         if not isinstance(logging_cfg, dict):
@@ -187,6 +195,11 @@ class TrainingRunConfig:
                 f"training.device.accelerator must be 'auto', 'cpu', or 'cuda', got {accelerator}"
             )
 
+        sync_batchnorm = bool(distributed_cfg.get("sync_batchnorm", False))
+        find_unused_parameters = bool(
+            distributed_cfg.get("find_unused_parameters", False)
+        )
+
         max_epochs = int(loop_cfg.get("max_epochs", 1))
         validate_every_n_epochs = int(loop_cfg.get("validate_every_n_epochs", 1))
         max_train_batches = _maybe_int(loop_cfg.get("max_train_batches", None))
@@ -215,6 +228,8 @@ class TrainingRunConfig:
             dataset_config_path=dataset_config_path,
             generation_config_path=generation_config_path,
             accelerator=accelerator,
+            sync_batchnorm=sync_batchnorm,
+            find_unused_parameters=find_unused_parameters,
             max_epochs=max_epochs,
             max_train_batches=max_train_batches,
             max_val_batches=max_val_batches,
@@ -255,7 +270,13 @@ class Trainer:
         self.data: BuiltTrainingData = build_training_data(self.cfg.training_config_path)
 
         self.model_spec = ModelSpec.from_yaml(self.cfg.model_config_path)
-        self.model = build_model(self.model_spec).to(self.device)
+        model = build_model(self.model_spec).to(self.device)
+        self.model = _wrap_model_for_distributed(
+            model,
+            device=self.device,
+            sync_batchnorm=self.cfg.sync_batchnorm,
+            find_unused_parameters=self.cfg.find_unused_parameters,
+        )
         self.loss_fn = EDMLoss(
             rain_gate_cfg={
                 "enabled": self.model_spec.rain_gate_loss.enabled,
@@ -294,7 +315,7 @@ class Trainer:
 
         self.ema: EMA | None = None
         if self.ema_config.enabled:
-            self.ema = EMA.from_config(self.model, self.ema_config)
+            self.ema = EMA.from_config(unwrap_model(self.model), self.ema_config)
 
         self.current_epoch = 0
         self.global_step = 0
@@ -434,7 +455,7 @@ class Trainer:
             self.scaler.update()
 
             if self.ema is not None:
-                self.ema.update(self.model)
+                self.ema.update(unwrap_model(self.model))
 
             loss_value = float(loss.item())
             total_loss += loss_value
@@ -469,7 +490,9 @@ class Trainer:
     def validate_epoch(self, epoch: int) -> dict[str, float]:
         eval_model = self.model
         if self.ema is not None:
-            eval_model = self.ema.clone_model(self.model).to(self.device)
+            eval_model = self.ema.clone_model(unwrap_model(self.model)).to(
+                self.device
+            )
         eval_model.eval()
 
         total_loss = 0.0
@@ -771,8 +794,8 @@ class Trainer:
 
     def _get_preview_model(self) -> torch.nn.Module:
         if self.preview_config.use_ema_model and self.ema is not None:
-            return self.ema.clone_model(self.model).to(self.device)
-        return self.model
+            return self.ema.clone_model(unwrap_model(self.model)).to(self.device)
+        return unwrap_model(self.model)
 
     def _run_generation_preview(self, epoch: int) -> dict[str, Any] | None:
         if self.cfg.generation_config_path is None:
@@ -860,9 +883,19 @@ class Trainer:
         if accelerator == "cuda":
             if not torch.cuda.is_available():
                 raise RuntimeError("CUDA was requested but is not available")
-            return torch.device("cuda")
+            return (
+                torch.device("cuda", local_rank())
+                if is_distributed()
+                else torch.device("cuda")
+            )
         if accelerator == "auto":
-            return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            if torch.cuda.is_available():
+                return (
+                    torch.device("cuda", local_rank())
+                    if is_distributed()
+                    else torch.device("cuda")
+                )
+            return torch.device("cpu")
         raise ValueError(f"Unsupported accelerator value: {accelerator}")
 
     @staticmethod
@@ -917,3 +950,32 @@ def _maybe_int(value: Any) -> int | None:
     if value is None:
         return None
     return int(value)
+
+
+def _wrap_model_for_distributed(
+    model: torch.nn.Module,
+    *,
+    device: torch.device,
+    sync_batchnorm: bool,
+    find_unused_parameters: bool,
+) -> torch.nn.Module:
+    if not is_distributed():
+        return model
+    if not dist.is_available() or not dist.is_initialized():
+        raise RuntimeError(
+            "Distributed runtime was detected before the process group was initialized"
+        )
+
+    if sync_batchnorm:
+        if device.type != "cuda":
+            raise RuntimeError("SyncBatchNorm requires CUDA/ROCm DDP training")
+        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
+
+    ddp_kwargs: dict[str, Any] = {
+        "find_unused_parameters": find_unused_parameters,
+    }
+    if device.type == "cuda":
+        ddp_kwargs["device_ids"] = [device.index]
+        ddp_kwargs["output_device"] = device.index
+
+    return DistributedDataParallel(model, **ddp_kwargs)
