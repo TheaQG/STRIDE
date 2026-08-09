@@ -85,6 +85,8 @@ class ExperimentRunner:
     # ------------------------------------------------------------------
 
     def run(self) -> ExperimentSummary:
+        self._validate_single_process_runner()
+
         start_ts = time.time()
         started_at = self._utc_now_iso()
 
@@ -170,11 +172,12 @@ class ExperimentRunner:
         stdout_path = self.logs_dir / f"{stage_name}.stdout.log"
         stderr_path = self.logs_dir / f"{stage_name}.stderr.log"
 
-        command = [sys.executable, str(stage_script), "--config", str(config_path)]
+        command = self._build_stage_command(stage_name, stage_script, config_path)
 
         self.logger.info(self._format_header(f"Running stage: {stage_name}"))
         self.logger.info(f"Config: {config_path}")
         self.logger.info(f"Script: {stage_script}")
+        self.logger.info(f"Command: {' '.join(command)}")
         self.logger.info(f"Stdout: {stdout_path}")
         self.logger.info(f"Stderr: {stderr_path}")
 
@@ -187,7 +190,7 @@ class ExperimentRunner:
             process = subprocess.run(
                 command,
                 cwd=str(self.repo_root),
-                env=self._build_subprocess_env(),
+                env=self._build_subprocess_env(stage_name),
                 stdout=stdout_f,
                 stderr=stderr_f,
                 check=False,
@@ -247,8 +250,74 @@ class ExperimentRunner:
 
         return mapping[stage_name]
 
-    def _build_subprocess_env(self) -> dict[str, str]:
+    def _build_stage_command(
+        self,
+        stage_name: str,
+        stage_script: Path,
+        config_path: Path,
+    ) -> list[str]:
+        stage_args = [str(stage_script), "--config", str(config_path)]
+        if stage_name != "training":
+            return [sys.executable, *stage_args]
+
+        process_count = self._training_process_count()
+        if process_count == 1:
+            return [sys.executable, *stage_args]
+
+        return [
+            sys.executable,
+            "-m",
+            "torch.distributed.run",
+            "--standalone",
+            f"--nproc-per-node={process_count}",
+            *stage_args,
+        ]
+
+    def _training_process_count(self) -> int:
+        raw_value = os.environ.get("STRIDE_TRAIN_NPROC", "1")
+        try:
+            process_count = int(raw_value)
+        except ValueError as exc:
+            raise ValueError(
+                f"STRIDE_TRAIN_NPROC must be an integer, got {raw_value!r}"
+            ) from exc
+
+        if process_count <= 0:
+            raise ValueError(
+                f"STRIDE_TRAIN_NPROC must be positive, got {process_count}"
+            )
+        return process_count
+
+    def _validate_single_process_runner(self) -> None:
+        raw_world_size = os.environ.get(
+            "WORLD_SIZE",
+            os.environ.get("SLURM_NTASKS", "1"),
+        )
+        try:
+            runner_world_size = int(raw_world_size)
+        except ValueError as exc:
+            raise ValueError(
+                f"Pipeline launcher world size must be an integer, got {raw_world_size!r}"
+            ) from exc
+
+        if runner_world_size > 1:
+            raise RuntimeError(
+                "Launch the pipeline as one process. Configure only the training "
+                "subprocess with STRIDE_TRAIN_NPROC."
+            )
+
+    def _build_subprocess_env(self, stage_name: str) -> dict[str, str]:
         env = dict(os.environ)
+
+        if stage_name in {"generation", "evaluation"}:
+            for name in (
+                "RANK",
+                "LOCAL_RANK",
+                "WORLD_SIZE",
+                "MASTER_ADDR",
+                "MASTER_PORT",
+            ):
+                env.pop(name, None)
 
         repo_str = str(self.repo_root)
         existing = env.get("PYTHONPATH", "")
