@@ -52,6 +52,9 @@ data:
 training:
   run_name: train_norcp
   overrides:
+    distributed:
+      # RainGate is present in the model but its auxiliary loss is disabled.
+      find_unused_parameters: true
     loop:
       max_epochs: 5
   
