@@ -284,18 +284,36 @@ python cli/launch_pipeline.py \
 
 ## 7. HPC (LUMI) usage
 
+NorCP training supports single-node DDP with one training process per GPU.
+Generation and evaluation remain single-process. See the complete
+[`training/distributed_training.md`](training/distributed_training.md) guide
+for batch-size semantics, RCCL troubleshooting, performance expectations, and
+monitoring.
+
+Typical eight-GPU smoke test:
+
+```
+sbatch --account=<project> \
+  --export=ALL,MODE=smoke,STRIDE_TRAIN_NPROC=8 \
+  bash/hpc/run_norcp_test.sh
+```
+
 Typical workflow:
 
 1. Copy data to `/scratch/...`
 2. Ensure container + overlay are available
-3. Submit SLURM job
+3. Run the pipeline dry-run
+4. Submit the DDP smoke test
+5. Inspect training, generation, and evaluation logs
+6. Submit the full job only after measuring epoch duration
 
 Important environment variables:
 
 ```
 ROOT_DIR
-DATA_DIR
-RUN_ROOT
+STRIDE_RUNS
+NORCP_DATA_DIR
+STRIDE_TRAIN_NPROC
 ```
 
 ---
@@ -304,29 +322,31 @@ RUN_ROOT
 
 ### Data loading
 
-In `training_base.yaml`:
-
-```
-num_workers: 8
-pin_memory: true
-persistent_workers: true
-prefetch_factor_train: 4
-prefetch_factor_val: 2
-```
-
-⚠️ Too many workers (e.g. 50+) can slow things down.
+The current base config uses `num_workers: 0`. Treat worker count as a separate
+performance experiment: under DDP the total worker count is approximately
+`num_workers x world_size`, and too many concurrent readers can make Lustre
+performance worse.
 
 ---
 
 ### GPU usage
 
-Check with:
+On a LUMI compute node, check with:
 ```
-nvidia-smi
+rocm-smi --showuse --showmemuse
 ```
 
-If you only see activity on one GPU:
-→ you are running single-GPU
+For DDP, all requested GPUs should have model memory allocated and should show
+activity across repeated samples.
+
+The configured training batch size is per rank:
+
+```
+global batch size = per-rank batch size x number of ranks
+```
+
+Very small per-rank batches can make DDP slower than expected because gradient
+communication and fixed step overhead dominate the model work.
 
 ---
 
@@ -388,15 +408,18 @@ Fix:
 ### Slow training
 
 Common causes:
-- too many workers
+- a very small per-rank DDP batch
+- too many data-loader workers
 - no GPU utilization
 - data loading bottleneck
+- verbose RCCL diagnostics left enabled
 
 ---
 
 ## 11. Known limitations
 
-- Further GPU optimization may require additional setup (DDP)
+- DDP is currently limited to single-node training
+- Generation and evaluation are currently single-process
 - Performance still under active optimization
 - Some configs are experimental
 
