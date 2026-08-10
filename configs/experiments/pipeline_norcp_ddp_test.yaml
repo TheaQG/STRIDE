@@ -53,13 +53,17 @@ training:
   run_name: train_norcp_ddp_test
   overrides:
     data:
-      # Per-rank batch size: 2 x 8 ranks gives global batch size 16.
-      batch_size: 2
+      # Throughput pilot: 8 samples x 8 ranks gives global batch size 64.
+      batch_size: 8
     distributed:
       # RainGate is present in the model but its auxiliary loss is disabled.
       find_unused_parameters: true
     loop:
       max_epochs: 5
+    logging:
+      # Rank zero reports enough progress to estimate step and epoch duration.
+      print_step_progress: true
+      print_every_n_steps: 50
 
 model:
   overrides:
