@@ -27,7 +27,7 @@ set -eo pipefail
 #   bash/hpc/run_norcp.sh
 #
 # Optional overrides:
-#   CONFIG_REL=configs/experiments/pipeline_norcp.yaml
+#   CONFIG_REL=configs/experiments/pipeline_norcp_ddp.yaml
 #   CONTAINER=/scratch/project_465002493/containers/images/my_torch_container_with_plotting.sif
 #   OVERLAY_IMG=/scratch/project_465002493/containers/overlays/my_overlay.img
 #   STRIDE_RUNS=/scratch/project_465002493/$USER/runs/STRIDE
@@ -48,7 +48,7 @@ CONTAINER="${CONTAINER:-/scratch/${ACCOUNT}/containers/images/my_torch_container
 OVERLAY_IMG="${OVERLAY_IMG:-/scratch/${ACCOUNT}/containers/overlays/my_overlay.img}"
 USE_OVERLAY="${USE_OVERLAY:-1}"
 
-CONFIG_REL="${CONFIG_REL:-configs/experiments/pipeline_norcp.yaml}"
+CONFIG_REL="${CONFIG_REL:-configs/experiments/pipeline_norcp_ddp.yaml}"
 RUN_NAME="${RUN_NAME:-stride_norcp_full}"
 RUN_ROOT="${RUN_ROOT:-${STRIDE_RUNS}/${RUN_NAME}}"
 LOG_DIR="${LOG_DIR:-${RUN_ROOT}/logs}"
