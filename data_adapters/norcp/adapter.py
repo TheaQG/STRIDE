@@ -35,7 +35,7 @@ from __future__ import annotations
 import math
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -49,6 +49,9 @@ from data_adapters.norcp.statistics.io import build_stats_output_path, load_tran
 from data_adapters.norcp.transforms import BaseTransform, build_transform
 from data_adapters.norcp.variable_registry import get_default_transform
 from stride_core.configs.adapter_config import AdapterConfig
+
+if TYPE_CHECKING:
+    from data_adapters.norcp.output_metadata import NorCPOutputMetadata
 
 
 DEFAULT_FLOAT_DTYPE = np.float32
@@ -224,6 +227,28 @@ class NorCPDataset(Dataset):
 
     def __len__(self) -> int:
         return len(self.timestamps)
+
+    def get_output_metadata(self, index: int) -> NorCPOutputMetadata:
+        """Read target export metadata on demand, outside normal sample loading.
+
+        A temporal NetCDF stack needs one fixed grid. Full-domain and fixed
+        crops are supported; spatially shuffled crops are not.
+        """
+        from data_adapters.norcp.output_metadata import load_output_metadata
+
+        if self.spatial_shuffle:
+            raise ValueError("NetCDF output metadata requires spatial_shuffle=False (a fixed grid)")
+        timestamp = self.timestamps[index]
+        sample = self._sample_lookup[timestamp]
+        target_files = sample_entry_get(sample, "target_files", {})
+        return load_output_metadata(
+            file_path=target_files[self.target_variable],
+            variable=self.target_variable,
+            source=self.target_source,
+            aligned_timestamp=parse_iso_timestamp(timestamp),
+            file_time_offset_hours=float(self.target_time_offsets.get(self.target_variable, 0.0)),
+            crop=self.hr_crop_spec,
+        )
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         timestamp = self.timestamps[index]

@@ -23,8 +23,10 @@ generation:
     save_ensemble_mean: true
     save_plots: false
     save_physical: true
-    output_format: "npz"
-    storage_mode: "per_member_bundle" # later: "ensemble_bundle", "per_case"
+    output_format: "npz" # npz | netcdf (NorCP only; NetCDF writes no NPZ files)
+    # NetCDF currently requires all three products, save_physical: true,
+    # data.shuffle: false, a fixed grid, and stages.evaluation: false in pipelines.
+    storage_mode: "per_member_bundle" # NPZ only; ignored for NetCDF temporal stacks
 
   limits:
     max_cases: 3         # small smoke-test limit

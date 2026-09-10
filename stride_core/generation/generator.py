@@ -13,7 +13,7 @@ Current scope
 - rebuild the model and load checkpoint weights
 - build the requested dataset split and dataloader
 - generate one or more samples per case
-- save generated outputs as compressed `.npz`
+- save generated outputs as compressed `.npz` or NorCP temporal NetCDF stacks
 - optionally save simple per-case metadata
 
 Intentional non-goals for this first version
@@ -28,9 +28,10 @@ The first milestone for this file is a clean, trustworthy path from:
 """
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 import logging
 import torch
 from torch.utils.data import DataLoader
@@ -56,6 +57,9 @@ from stride_core.generation.output_saving import (
 from stride_core.generation.pmm import pmm_from_ensemble
 from stride_core.models.build_model import build_model
 from stride_core.training.data import build_dataset_adapter, stride_collate_fn
+
+if TYPE_CHECKING:
+    from stride_core.generation.netcdf_output import NetCDFWriter
 
 
 # -----------------------------------------------------------------------------
@@ -249,13 +253,21 @@ class GenerationRunConfig:
             )
 
         output_format = str(outputs_cfg.get("output_format", "npz"))
-        if output_format != "npz":
+        if output_format not in {"npz", "netcdf"}:
             raise ValueError(
-                f"Only 'npz' output_format is currently supported, got {output_format!r}"
+                f"output_format must be 'npz' or 'netcdf', got {output_format!r}"
             )
 
         storage_mode = str(outputs_cfg.get("storage_mode", "per_member"))
-        if storage_mode not in {"per_member", "per_member_bundle"}:
+        if output_format == "netcdf":
+            # This first NetCDF mode writes all three products in physical units.
+            for key in ("save_physical", "save_members", "save_ensemble_mean", "save_pmm"):
+                if not bool(outputs_cfg.get(key, True)):
+                    raise ValueError(f"NetCDF output requires outputs.{key}=true")
+            if bool(data_cfg.get("shuffle", False)):
+                raise ValueError("NetCDF output requires data.shuffle=false (chronological order)")
+            storage_mode = "temporal_stack"
+        elif storage_mode not in {"per_member", "per_member_bundle"}:
             raise ValueError(
                 "generation_run.outputs.storage_mode must be one of: "
                 f"'per_member', 'per_member_bundle'. Got {storage_mode!r}."
@@ -301,8 +313,8 @@ class GenerationRunConfig:
                 save_members=bool(outputs_cfg.get("save_members", True)),
                 save_metadata=bool(outputs_cfg.get("save_metadata", True)),
                 save_physical=bool(outputs_cfg.get("save_physical", True)),
-                save_ensemble_mean=bool(outputs_cfg.get("save_ensemble_mean", False)),
-                save_pmm=bool(outputs_cfg.get("save_pmm", False)),
+                save_ensemble_mean=bool(outputs_cfg.get("save_ensemble_mean", output_format == "netcdf")),
+                save_pmm=bool(outputs_cfg.get("save_pmm", output_format == "netcdf")),
                 save_plots=bool(outputs_cfg.get("save_plots", False)),
                 output_format=output_format,
                 storage_mode=storage_mode,
@@ -357,7 +369,8 @@ class Generator:
 
         self.device = self._resolve_device(self.cfg.device_accelerator)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.samples_dir.mkdir(parents=True, exist_ok=True)
+        if self.cfg.outputs.output_format == "npz":
+            self.samples_dir.mkdir(parents=True, exist_ok=True)
 
         self.adapter_cfg = AdapterConfig.from_yaml(self.cfg.paths.dataset_config_path)
         self.adapter = self._build_adapter()
@@ -377,25 +390,32 @@ class Generator:
     @torch.no_grad()
     def run(self) -> None:
         self._print_run_summary()
-        self._save_run_metadata()
+        output_context = (
+            self._create_netcdf_writer()
+            if self.cfg.outputs.output_format == "netcdf" else nullcontext()
+        )
+        # The NetCDF context publishes only after all requested cases succeed.
+        with output_context as netcdf_writer:
+            self._save_run_metadata()
+            generated_case_count = 0
+            for batch_idx, batch in enumerate(self.loader):
+                if (
+                    self.cfg.limits.max_cases is not None
+                    and generated_case_count >= self.cfg.limits.max_cases
+                ):
+                    break
 
-        generated_case_count = 0
-        for batch_idx, batch in enumerate(self.loader):
-            if (
-                self.cfg.limits.max_cases is not None
-                and generated_case_count >= self.cfg.limits.max_cases
-            ):
-                break
-
-            batch = move_batch_to_device(batch, self.device)
-            processed_cases = self._generate_for_batch(
-                batch,
-                batch_idx=batch_idx,
-                remaining_cases=None
-                if self.cfg.limits.max_cases is None
-                else self.cfg.limits.max_cases - generated_case_count,
-            )
-            generated_case_count += processed_cases
+                batch = move_batch_to_device(batch, self.device)
+                processed_cases = self._generate_for_batch(
+                    batch,
+                    batch_idx=batch_idx,
+                    remaining_cases=None
+                    if self.cfg.limits.max_cases is None
+                    else self.cfg.limits.max_cases - generated_case_count,
+                    netcdf_writer=netcdf_writer,
+                    case_offset=generated_case_count,
+                )
+                generated_case_count += processed_cases
 
         if self.cfg.outputs.save_plots:
             logger.info(
@@ -405,6 +425,42 @@ class Generator:
     # ------------------------------------------------------------------
     # Setup helpers
     # ------------------------------------------------------------------
+
+    def _create_netcdf_writer(self) -> NetCDFWriter:
+        """Open one temporal stack for this NorCP run; never create NPZ output."""
+        from data_adapters.norcp.adapter import NorCPDataset
+        from stride_core.generation.netcdf_output import NetCDFWriter
+
+        if not isinstance(self.dataset, NorCPDataset):
+            raise ValueError("NetCDF generation currently supports the NorCP adapter only")
+        if self.samples_dir.exists():
+            raise FileExistsError("Use a new output directory for NetCDF; an existing samples/ directory was found")
+        case_count = len(self.dataset)
+        if self.cfg.limits.max_cases is not None:
+            case_count = min(case_count, self.cfg.limits.max_cases)
+        if case_count == 0:
+            raise ValueError("Cannot generate a NetCDF stack from an empty dataset")
+        metadata = self.dataset.get_output_metadata(0)
+        self._netcdf_reference_metadata = metadata
+        return NetCDFWriter(
+            self.output_dir / "netcdf",
+            variable_name=metadata.variable_name, units=metadata.units, grid=metadata.grid,
+            variable_attributes=metadata.variable_attributes,
+            calendar=metadata.calendar, with_time_bounds=metadata.time_bounds is not None,
+            member_count=self.cfg.sampling.ensemble_size, expected_timesteps=case_count,
+            global_attributes={
+                "run_name": self.cfg.run_name,
+                "checkpoint_path": str(self.checkpoint_path),
+                "use_ema_weights": self.cfg.checkpoint.use_ema_weights,
+                "dataset_config": str(self.cfg.paths.dataset_config_path),
+                "generation_run_config": str(self.cfg.config_path),
+                "split": self.cfg.data.split,
+                "stride_time_reference": "source target representative time",
+                "stride_alignment_offset_hours": float(
+                    self.dataset.target_time_offsets.get(metadata.variable_name, 0.0)
+                ),
+            },
+        )
 
     def _resolve_device(self, accelerator: str) -> torch.device:
         if accelerator == "cpu":
@@ -566,6 +622,8 @@ class Generator:
         *,
         batch_idx: int,
         remaining_cases: int | None,
+        netcdf_writer: NetCDFWriter | None = None,
+        case_offset: int = 0,
     ) -> int:
         batch_size = self._infer_batch_size(batch)
         if remaining_cases is not None:
@@ -599,6 +657,12 @@ class Generator:
 
         for case_idx in range(batch_size):
             case_batch = self._slice_batch(batch, case_idx)
+            if netcdf_writer is not None:
+                self._save_netcdf_case(
+                    netcdf_writer, case_batch, generated_members[case_idx],
+                    dataset_index=case_offset + case_idx,
+                )
+                continue  # NetCDF is an alternative to NPZ, not an additional copy.
             case_output_dir = build_case_output_dir(
                 self.samples_dir,
                 date=dates[case_idx],
@@ -679,6 +743,32 @@ class Generator:
                 )
 
         return batch_size
+
+    def _save_netcdf_case(
+        self, writer: NetCDFWriter, batch: dict[str, Any],
+        members: list[torch.Tensor], *, dataset_index: int,
+    ) -> None:
+        """Convert members first, then aggregate and append one physical record."""
+        reference = self._netcdf_reference_metadata
+        metadata = reference if dataset_index == 0 else self.dataset.get_output_metadata(dataset_index)
+        timestamp = self._get_batch_meta_list(batch, "timestamp", 1)[0]
+        if timestamp != metadata.aligned_timestamp.isoformat():
+            raise ValueError("NetCDF metadata does not match the generated sample timestamp")
+        for name in ("x", "y", "latitude", "longitude"):
+            if not np.array_equal(getattr(metadata.grid, name), getattr(reference.grid, name)):
+                raise ValueError(f"NorCP {name} coordinates changed within a fixed-grid NetCDF run")
+        if metadata.calendar != reference.calendar or metadata.units != reference.units:
+            raise ValueError("NorCP calendar or physical units changed within the NetCDF run")
+
+        physical_members = [inverse_transform_target_tensor(batch, member) for member in members]
+        mean = self._compute_ensemble_mean(physical_members)
+        mask = self._build_pmm_mask(batch, members[0])
+        pmm = self._compute_pmm(physical_members, mask=mask)
+        writer.append(
+            metadata.timestamp, time_bounds=metadata.time_bounds,
+            members=torch.cat(physical_members, dim=0)[:, 0].numpy(),
+            ensemble_mean=mean[0, 0].numpy(), pmm=pmm[0, 0].numpy(),
+        )
 
 
     def _compute_ensemble_mean(self, generated_members: list[torch.Tensor]) -> torch.Tensor:
@@ -834,7 +924,11 @@ class Generator:
         logger.info(f"Run name:          {self.cfg.run_name}")
         logger.info(f"Device:            {self.device}")
         logger.info(f"Output dir:        {self.output_dir}")
-        logger.info(f"Samples dir:       {self.samples_dir}")
+        if self.cfg.outputs.output_format == "netcdf":
+            logger.info(f"NetCDF dir:        {self.output_dir / 'netcdf'}")
+        else:
+            logger.info(f"Samples dir:       {self.samples_dir}")
+        logger.info(f"Output format:     {self.cfg.outputs.output_format}")
         logger.info(f"Dataset config:    {self.cfg.paths.dataset_config_path}")
         logger.info(f"Model config:      {self.cfg.paths.model_config_path}")
         logger.info(f"Generation config: {self.cfg.paths.generation_config_path}")

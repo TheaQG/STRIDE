@@ -375,6 +375,9 @@ def save_run_metadata(
         "output_format": str(output_format),
         "storage_mode": str(storage_mode),
         "storage_note": (
+            "NetCDF-only temporal stacks in netcdf/; no per-case NPZ files. "
+            "netcdf/netcdf_manifest.json marks completed output."
+            if output_format == "netcdf" else
             "Current generation outputs use a simple file-per-product layout. "
             "For large ensembles, consider a future compact backend such as per-case "
             "ensemble bundles, Zarr, or NetCDF/HDF5."

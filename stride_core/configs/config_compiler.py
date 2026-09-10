@@ -180,6 +180,17 @@ class ConfigCompiler:
             training_run_config_path=training_run_config_path,
             experiment_root=experiment_root,
         )
+        generation_defaults = resolved_generation_base.get("generation", resolved_generation_base)
+        generation_outputs = dict(generation_defaults.get("outputs", {}))
+        generation_outputs.update(generation_run_cfg["generation_run"].get("outputs", {}))
+        if (
+            self.cfg.stages.generation and self.cfg.stages.evaluation
+            and generation_outputs.get("output_format", "npz") == "netcdf"
+        ):
+            raise ValueError(
+                "NetCDF generation is not yet supported by STRIDE evaluation. "
+                "Set stages.evaluation=false for this export run."
+            )
         generation_run_config_path = self._write_yaml(
             generation_run_cfg,
             compiled_dir / "generation_run_resolved.yaml",
