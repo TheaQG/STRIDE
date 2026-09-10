@@ -43,6 +43,7 @@ from stride_core.configs.adapter_config import AdapterConfig
 from stride_core.generation.generation_utils import (
     build_preview_payload,
     generate_batch,
+    inverse_transform_target_tensor,
     move_batch_to_device,
 )
 from stride_core.generation.output_saving import (
@@ -631,8 +632,23 @@ class Generator:
                         f"Unsupported storage_mode {self.cfg.outputs.storage_mode!r}"
                     )
 
+            # Physical aggregates must be computed AFTER converting each member.
+            # Keep separate model-space aggregates for the existing `generated` key.
+            physical_members = None
+            if self.cfg.outputs.save_physical and (
+                self.cfg.outputs.save_ensemble_mean or self.cfg.outputs.save_pmm
+            ):
+                physical_members = [
+                    inverse_transform_target_tensor(case_batch, member)
+                    for member in generated_members[case_idx]
+                ]
+
             if self.cfg.outputs.save_ensemble_mean:
                 ensemble_mean = self._compute_ensemble_mean(generated_members[case_idx])
+                physical_mean = (
+                    self._compute_ensemble_mean(physical_members)
+                    if physical_members is not None else None
+                )
                 save_aggregate(
                     case_batch,
                     ensemble_mean,
@@ -641,10 +657,16 @@ class Generator:
                     checkpoint_path=self.checkpoint_path,
                     save_physical=self.cfg.outputs.save_physical,
                     save_metadata=self.cfg.outputs.save_metadata,
+                    generated_physical=physical_mean,
                 )
 
             if self.cfg.outputs.save_pmm:
-                pmm_field = self._compute_pmm(case_batch, generated_members[case_idx])
+                mask = self._build_pmm_mask(case_batch, generated_members[case_idx][0])
+                pmm_field = self._compute_pmm(generated_members[case_idx], mask=mask)
+                physical_pmm = (
+                    self._compute_pmm(physical_members, mask=mask)
+                    if physical_members is not None else None
+                )
                 save_aggregate(
                     case_batch,
                     pmm_field,
@@ -653,6 +675,7 @@ class Generator:
                     checkpoint_path=self.checkpoint_path,
                     save_physical=self.cfg.outputs.save_physical,
                     save_metadata=self.cfg.outputs.save_metadata,
+                    generated_physical=physical_pmm,
                 )
 
         return batch_size
@@ -667,9 +690,11 @@ class Generator:
 
     def _compute_pmm(
         self,
-        batch: dict[str, Any],
         generated_members: list[torch.Tensor],
+        *,
+        mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        """Compute PMM in the supplied members' space, using an already-built mask."""
         if len(generated_members) == 0:
             raise ValueError("generated_members must contain at least one tensor")
 
@@ -681,7 +706,6 @@ class Generator:
             )
 
         ensemble_univariate = ensemble[:, 0]  # [M, H, W]
-        mask = self._build_pmm_mask(batch, generated_members[0])
         return pmm_from_ensemble(
             ensemble_univariate,
             mask=mask,
