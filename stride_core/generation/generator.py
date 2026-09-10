@@ -570,6 +570,7 @@ class Generator:
         if remaining_cases is not None:
             batch_size = min(batch_size, remaining_cases)
         dates = self._get_batch_meta_list(batch, "date", batch_size)
+        timestamps = self._get_batch_meta_list(batch, "timestamp", batch_size)
 
         generated_members: list[list[torch.Tensor]] = [[] for _ in range(batch_size)]
 
@@ -600,6 +601,7 @@ class Generator:
             case_output_dir = build_case_output_dir(
                 self.samples_dir,
                 date=dates[case_idx],
+                timestamp=timestamps[case_idx],
                 fallback_name=f"batch_{batch_idx:04d}_case_{case_idx:02d}",
             )
 
@@ -777,11 +779,9 @@ class Generator:
         if not isinstance(meta, dict):
             return [None] * batch_size
         value = meta.get(key)
-        if isinstance(value, list):
-            if len(value) == batch_size:
-                return value
-            if len(value) == 1 and batch_size == 1:
-                return value
+        if isinstance(value, list) and len(value) >= batch_size:
+            # max_cases can select only a prefix of the collated batch.
+            return value[:batch_size]
         return [None] * batch_size
 
     def _set_member_seed(self, *, batch_idx: int, member_idx: int) -> None:

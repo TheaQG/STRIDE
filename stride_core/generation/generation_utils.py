@@ -343,6 +343,7 @@ def build_preview_payload(
         "cond_static_physical": physical["cond_static"],
         "variable_names": variable_names,
         "date": get_batch_meta_value(batch, "date"),
+        "timestamp": get_batch_meta_value(batch, "timestamp"),
         "domain_tag": get_batch_meta_value(batch, "domain_tag"),
         "transform_metadata": get_transform_metadata_from_batch(batch),
     }

@@ -20,7 +20,7 @@ The current implementation keeps the simple and transparent layout:
 runs/<train_run>/generation/<generation_run>/
     generation_metadata.json
     samples/
-        <date>/
+        <timestamp_or_date>/
             member_0000.npz
             member_0000.json
             member_0001.npz
@@ -44,6 +44,7 @@ inspect and robust during early pipeline development.
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 import json
@@ -85,8 +86,20 @@ def ensure_dir(path: str | Path) -> Path:
 
 
 
-def case_output_dir(samples_dir: str | Path, *, date: Any, fallback_name: str) -> Path:
+def case_output_dir(
+    samples_dir: str | Path,
+    *,
+    date: Any,
+    fallback_name: str,
+    timestamp: str | None = None,
+) -> Path:
+    """Prefer full ISO timestamps; preserve date-only layouts for daily adapters."""
     samples_dir = ensure_dir(samples_dir)
+    if timestamp is not None:
+        # Keep seconds, fractional seconds and any UTC offset. Replace colons
+        # only for filesystem portability; the original timestamp stays in JSON.
+        case_id = datetime.fromisoformat(timestamp).isoformat().replace(":", "-")
+        return ensure_dir(samples_dir / case_id)
     if date is not None:
         return ensure_dir(samples_dir / str(date))
     return ensure_dir(samples_dir / fallback_name)
@@ -134,6 +147,7 @@ def _build_common_metadata(
 ) -> dict[str, Any]:
     return {
         "date": payload.get("date"),
+        "timestamp": payload.get("timestamp"),
         "domain_tag": payload.get("domain_tag"),
         "variable_names": payload.get("variable_names"),
         "checkpoint_path": str(checkpoint_path),
