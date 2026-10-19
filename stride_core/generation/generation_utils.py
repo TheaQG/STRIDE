@@ -216,38 +216,81 @@ def _inverse_transform_single_tensor(
     transform_cfg: dict[str, Any] | None,
 ) -> torch.Tensor:
     """
-    Invert a single transformed tensor using adapter-provided metadata.
+    Match the adapter's inverse without moving the tensor off its device.
 
-    Supported transforms
-    --------------------
-    - identity
-    - zscore
-    - log_zscore  (inverse: exp(z * std_log + mean_log) - clip_min)
+    NorCP uses ``transform_name/parameters`` and log(x + epsilon).
+    DANRA/ERA5 uses ``name/stats`` and log1p(x), with eps added to std.
     """
     if transform_cfg is None:
         return tensor
 
-    name = str(transform_cfg.get("name", "identity"))
-    stats = transform_cfg.get("stats", {})
+    norcp_metadata = "transform_name" in transform_cfg
+    if norcp_metadata:
+        name = str(transform_cfg["transform_name"])
+        stats = transform_cfg.get("parameters", {})
+    elif "name" in transform_cfg:
+        name = str(transform_cfg["name"])
+        stats = transform_cfg.get("stats", {})
+    else:
+        raise ValueError("Transform metadata must contain 'name' or 'transform_name'")
     if not isinstance(stats, dict):
-        stats = {}
+        raise TypeError("Transform statistics must be a dictionary")
 
     if name == "identity":
         return tensor
 
     if name == "zscore":
-        mean = float(stats.get("mean", 0.0))
-        std = float(stats.get("std", 1.0))
-        return tensor * std + mean
+        mean = float(stats["mean"])
+        std = float(stats["std"])
+        eps = 0.0 if norcp_metadata else float(transform_cfg.get("eps", 1e-6))
+        return tensor * (std + eps) + mean
 
     if name == "log_zscore":
-        mean_log = float(stats.get("mean_log", 0.0))
-        std_log = float(stats.get("std_log", 1.0))
+        if norcp_metadata:
+            log_mean = float(stats["log_mean"])
+            log_std = float(stats["log_std"])
+            # NorCP metadata omits epsilon when the adapter default is used.
+            epsilon = float(stats.get("epsilon", 1e-6))
+            return (torch.exp(tensor * log_std + log_mean) - epsilon).clamp_min(0.0)
+
+        mean_log = float(stats["mean_log"])
+        std_log = float(stats["std_log"])
+        eps = float(transform_cfg.get("eps", 1e-6))
         clip_min = transform_cfg.get("clip_min", 0.0)
         clip_min_value = 0.0 if clip_min is None else float(clip_min)
-        return torch.exp(tensor * std_log + mean_log) - clip_min_value
+        return torch.expm1(tensor * (std_log + eps) + mean_log).clamp_min(clip_min_value)
 
     raise ValueError(f"Unsupported inverse transform '{name}'")
+
+
+def inverse_transform_target_tensor(
+    batch: dict[str, Any],
+    tensor: torch.Tensor,
+) -> torch.Tensor:
+    """Invert target/generated channels using the adapter's declared variable order.
+
+    Accept both DANRA's single target description and NorCP's per-variable map.
+    Missing metadata retains the existing no-op behavior for synthetic batches.
+    """
+    metadata = get_transform_metadata_from_batch(batch)
+    if metadata is None or get_batch_meta_value(batch, "apply_transforms") is False:
+        return tensor
+
+    target_cfg = metadata["target"]
+    if target_cfg is None or "name" in target_cfg or "transform_name" in target_cfg:
+        return _inverse_transform_single_tensor(tensor, target_cfg)
+
+    target_names = get_batch_meta_value(batch, "target_variables")
+    if target_names is None:
+        target_name = get_batch_meta_value(batch, "target_var")
+        target_names = [] if target_name is None else [target_name]
+    if not isinstance(target_names, (list, tuple)) or len(target_names) != tensor.shape[1]:
+        raise ValueError("Target variable names must match the tensor's channel count")
+
+    return torch.cat([
+        _inverse_transform_single_tensor(tensor[:, idx : idx + 1], target_cfg[name])
+        for idx, name in enumerate(target_names)
+    ], dim=1)
 
 
 
@@ -257,8 +300,8 @@ def inverse_transform_batch_tensors(
 ) -> dict[str, torch.Tensor | None]:
     """
     Build a physical-space version of the preview tensors when transform
-    metadata is available. If metadata is missing, the original tensors are
-    returned unchanged.
+    metadata is available. If metadata is missing or transforms were disabled,
+    the original tensors are returned unchanged.
     """
     transform_metadata = get_transform_metadata_from_batch(batch)
 
@@ -273,7 +316,7 @@ def inverse_transform_batch_tensors(
     if not isinstance(generated, torch.Tensor):
         raise TypeError("generated must be a torch.Tensor")
 
-    if transform_metadata is None:
+    if transform_metadata is None or get_batch_meta_value(batch, "apply_transforms") is False:
         return {
             "target": target,
             "generated": generated,
@@ -281,7 +324,6 @@ def inverse_transform_batch_tensors(
             "cond_static": cond_static if isinstance(cond_static, torch.Tensor) else None,
         }
 
-    target_cfg = transform_metadata.get("target")
     dynamic_cfg = transform_metadata.get("dynamic", {})
     static_cfg = transform_metadata.get("static", {})
 
@@ -289,8 +331,8 @@ def inverse_transform_batch_tensors(
     dynamic_names = variable_names["dynamic"]
     static_names = variable_names["static"]
 
-    target_phys = _inverse_transform_single_tensor(target, target_cfg)
-    generated_phys = _inverse_transform_single_tensor(generated, target_cfg)
+    target_phys = inverse_transform_target_tensor(batch, target)
+    generated_phys = inverse_transform_target_tensor(batch, generated)
 
     cond_dynamic_phys = cond_dynamic.clone()
     for idx in range(cond_dynamic.shape[1]):
@@ -343,6 +385,7 @@ def build_preview_payload(
         "cond_static_physical": physical["cond_static"],
         "variable_names": variable_names,
         "date": get_batch_meta_value(batch, "date"),
+        "timestamp": get_batch_meta_value(batch, "timestamp"),
         "domain_tag": get_batch_meta_value(batch, "domain_tag"),
         "transform_metadata": get_transform_metadata_from_batch(batch),
     }

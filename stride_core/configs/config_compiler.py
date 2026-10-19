@@ -180,6 +180,17 @@ class ConfigCompiler:
             training_run_config_path=training_run_config_path,
             experiment_root=experiment_root,
         )
+        generation_defaults = resolved_generation_base.get("generation", resolved_generation_base)
+        generation_outputs = dict(generation_defaults.get("outputs", {}))
+        generation_outputs.update(generation_run_cfg["generation_run"].get("outputs", {}))
+        if (
+            self.cfg.stages.generation and self.cfg.stages.evaluation
+            and generation_outputs.get("output_format", "npz") == "netcdf"
+        ):
+            raise ValueError(
+                "NetCDF generation is not yet supported by STRIDE evaluation. "
+                "Set stages.evaluation=false for this export run."
+            )
         generation_run_config_path = self._write_yaml(
             generation_run_cfg,
             compiled_dir / "generation_run_resolved.yaml",
@@ -911,9 +922,8 @@ class ConfigCompiler:
         # misleading because Trainer builds from `configs.model_config`.
         training_overrides.pop("model", None)
 
-        self._deep_update(config, training_overrides)
-
         training_cfg = config["training"]
+        self._deep_update(training_cfg, training_overrides)
 
         # ------------------------------------------------------------------
         # Resolve DataLoader workers from environment (HPC-friendly)
@@ -932,8 +942,18 @@ class ConfigCompiler:
             if env_workers is not None:
                 try:
                     env_workers_int = int(env_workers)
-                    # Leave a couple of CPUs for main process / overhead
-                    resolved_workers = max(1, env_workers_int - 2)
+                    train_processes = int(
+                        os.environ.get("STRIDE_TRAIN_NPROC", "1")
+                    )
+                    if train_processes <= 0:
+                        raise ValueError("STRIDE_TRAIN_NPROC must be positive")
+
+                    if train_processes == 1:
+                        # Leave a couple of CPUs for the main process / overhead.
+                        resolved_workers = max(1, env_workers_int - 2)
+                    else:
+                        cpus_per_process = env_workers_int // train_processes
+                        resolved_workers = max(0, cpus_per_process - 1)
                 except Exception:
                     resolved_workers = 0
             else:

@@ -20,7 +20,7 @@ The current implementation keeps the simple and transparent layout:
 runs/<train_run>/generation/<generation_run>/
     generation_metadata.json
     samples/
-        <date>/
+        <timestamp_or_date>/
             member_0000.npz
             member_0000.json
             member_0001.npz
@@ -44,6 +44,7 @@ inspect and robust during early pipeline development.
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 import json
@@ -51,7 +52,11 @@ import json
 import numpy as np
 import torch
 
-from stride_core.generation.generation_utils import build_preview_payload, tensor_to_numpy
+from stride_core.generation.generation_utils import (
+    build_preview_payload,
+    inverse_transform_target_tensor,
+    tensor_to_numpy,
+)
 
 
 # -----------------------------------------------------------------------------
@@ -85,8 +90,20 @@ def ensure_dir(path: str | Path) -> Path:
 
 
 
-def case_output_dir(samples_dir: str | Path, *, date: Any, fallback_name: str) -> Path:
+def case_output_dir(
+    samples_dir: str | Path,
+    *,
+    date: Any,
+    fallback_name: str,
+    timestamp: str | None = None,
+) -> Path:
+    """Prefer full ISO timestamps; preserve date-only layouts for daily adapters."""
     samples_dir = ensure_dir(samples_dir)
+    if timestamp is not None:
+        # Keep seconds, fractional seconds and any UTC offset. Replace colons
+        # only for filesystem portability; the original timestamp stays in JSON.
+        case_id = datetime.fromisoformat(timestamp).isoformat().replace(":", "-")
+        return ensure_dir(samples_dir / case_id)
     if date is not None:
         return ensure_dir(samples_dir / str(date))
     return ensure_dir(samples_dir / fallback_name)
@@ -134,6 +151,7 @@ def _build_common_metadata(
 ) -> dict[str, Any]:
     return {
         "date": payload.get("date"),
+        "timestamp": payload.get("timestamp"),
         "domain_tag": payload.get("domain_tag"),
         "variable_names": payload.get("variable_names"),
         "checkpoint_path": str(checkpoint_path),
@@ -198,7 +216,12 @@ def save_member_bundle(
 
     case_output_dir = ensure_dir(case_output_dir)
 
-    member_arrays = [tensor_to_numpy(member) for member in generated_members]
+    # Match the individual-member reader: generated_members is physical when
+    # save_physical=True, and remains in model space otherwise.
+    member_arrays = [
+        tensor_to_numpy(inverse_transform_target_tensor(batch, member) if save_physical else member)
+        for member in generated_members
+    ]
     member_arrays = [arr for arr in member_arrays if arr is not None]
     if not member_arrays:
         raise ValueError("All members failed to convert to numpy arrays.")
@@ -248,7 +271,22 @@ def save_aggregate(
     checkpoint_path: str | Path,
     save_physical: bool,
     save_metadata: bool,
+    generated_physical: torch.Tensor | None = None,
 ) -> tuple[Path, Path | None]:
+    """Save model-space and, optionally, independently computed physical aggregates.
+
+    `generated` retains its model-space meaning. Never obtain a physical mean or
+    PMM by inverse-transforming that aggregate: nonlinear transforms do not
+    commute with aggregation. The caller must supply the physical aggregate.
+    """
+    if save_physical:
+        if not isinstance(generated_physical, torch.Tensor):
+            raise ValueError("save_physical=True requires a precomputed generated_physical aggregate")
+        if generated_physical.shape != generated.shape:
+            raise ValueError("generated_physical must have the same shape as generated")
+    elif generated_physical is not None:
+        raise ValueError("generated_physical requires save_physical=True")
+
     case_output_dir = ensure_dir(case_output_dir)
     payload = build_preview_payload(batch, generated)
     array_payload = _build_array_payload(
@@ -256,6 +294,10 @@ def save_aggregate(
         generated,
         save_physical=save_physical,
     )
+    if generated_physical is not None:
+        # Replace the generic preview conversion with the actual physical
+        # aggregate. Do not inverse-transform this already-physical tensor.
+        array_payload["generated_physical"] = generated_physical.detach().cpu().numpy()
 
     npz_path = case_output_dir / f"{name}.npz"
     np.savez_compressed(npz_path, **array_payload)
@@ -268,6 +310,9 @@ def save_aggregate(
             save_physical=save_physical,
         )
         metadata["aggregate_name"] = str(name)
+        metadata["aggregation_spaces"] = {"generated": "model"}
+        if save_physical:
+            metadata["aggregation_spaces"]["generated_physical"] = "physical"
         json_path = case_output_dir / f"{name}.json"
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(metadata, f, indent=2)
@@ -330,6 +375,9 @@ def save_run_metadata(
         "output_format": str(output_format),
         "storage_mode": str(storage_mode),
         "storage_note": (
+            "NetCDF-only temporal stacks in netcdf/; no per-case NPZ files. "
+            "netcdf/netcdf_manifest.json marks completed output."
+            if output_format == "netcdf" else
             "Current generation outputs use a simple file-per-product layout. "
             "For large ensembles, consider a future compact backend such as per-case "
             "ensemble bundles, Zarr, or NetCDF/HDF5."
