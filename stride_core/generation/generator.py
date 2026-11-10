@@ -29,9 +29,10 @@ The first milestone for this file is a clean, trustworthy path from:
 from __future__ import annotations
 
 from contextlib import nullcontext
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
+import json
 import logging
 import torch
 from torch.utils.data import DataLoader
@@ -41,6 +42,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 from stride_core.configs.adapter_config import AdapterConfig
+from stride_core.configs.generation_config import GenerationConfig
 from stride_core.generation.generation_utils import (
     build_preview_payload,
     generate_batch,
@@ -125,6 +127,7 @@ class GenerationRunConfig:
     checkpoint: CheckpointSelectionConfig
     data: GenerationDataConfig
     sampling: GenerationSamplingConfig
+    sampler: GenerationConfig
     limits: GenerationLimitsConfig
     outputs: GenerationOutputConfig
     config_path: Path
@@ -156,6 +159,12 @@ class GenerationRunConfig:
         if not isinstance(run_cfg, dict):
             raise ValueError("Expected generation run config to be a dict")
 
+        GenerationConfig.validate_run_placement(run_cfg)
+        if "generation_run" in cfg:
+            GenerationConfig.validate_run_placement(
+                {key: value for key, value in cfg.items() if key not in {"generation", "generation_run"}},
+                "generation-run config root",
+            )
         paths_cfg = run_cfg.get("paths", run_cfg.get("configs", {}))
         if not isinstance(paths_cfg, dict):
             raise ValueError(
@@ -187,6 +196,24 @@ class GenerationRunConfig:
             raise ValueError(
                 f"Expected generation base config YAML to decode into a dict, got {type(generation_base_cfg)}"
             )
+
+        sampler = GenerationConfig.from_dict(generation_base_cfg)
+        if "generation_run" in cfg and "generation" in cfg:
+            # Older compilers copied a partial generation override into the run YAML.
+            try:
+                duplicate = GenerationConfig.from_dict({"generation": cfg["generation"]}, fallback=sampler)
+            except ValueError as exc:
+                raise ValueError(f"Invalid generation block in run YAML {config_path}: {exc}") from exc
+            differences = [
+                key for key, value in duplicate.to_sampler_kwargs().items()
+                if value != getattr(sampler, key)
+            ]
+            if differences:
+                raise ValueError(
+                    f"Conflicting generation.sampler settings in run YAML {config_path}: "
+                    f"{', '.join(differences)} disagree with referenced base {generation_config_path}. "
+                    "Put sampler settings in the referenced base and remove the duplicate block."
+                )
 
         base_generation_cfg = generation_base_cfg.get("generation", generation_base_cfg)
         if not isinstance(base_generation_cfg, dict):
@@ -307,6 +334,7 @@ class GenerationRunConfig:
                 use_fixed_seed=bool(sampling_cfg.get("use_fixed_seed", False)),
                 base_seed=int(sampling_cfg.get("base_seed", 42)),
             ),
+            sampler=sampler,
             limits=GenerationLimitsConfig(
                 max_cases=max_cases,
             ),
@@ -454,6 +482,8 @@ class Generator:
                 "checkpoint_path": str(self.checkpoint_path),
                 "use_ema_weights": self.cfg.checkpoint.use_ema_weights,
                 "weight_source": self.weight_source,
+                "sampler": json.dumps(self.cfg.sampler.to_metadata()),
+                "sampling": json.dumps(asdict(self.cfg.sampling)),
                 "dataset_config": str(self.cfg.paths.dataset_config_path),
                 "generation_run_config": str(self.cfg.config_path),
                 "split": self.cfg.data.split,
@@ -740,7 +770,7 @@ class Generator:
             generated = generate_batch(
                 self.model,
                 batch,
-                generation_config=self.cfg.paths.generation_config_path,
+                generation_config=self.cfg.sampler,
                 device=self.device,
             )
             if not isinstance(generated, torch.Tensor):
@@ -966,6 +996,8 @@ class Generator:
             split=self.cfg.data.split,
             batch_size=self.cfg.data.batch_size,
             ensemble_size=self.cfg.sampling.ensemble_size,
+            sampler=self.cfg.sampler.to_metadata(),
+            sampling=asdict(self.cfg.sampling),
             max_cases=self.cfg.limits.max_cases,
             device=str(self.device),
             save_physical=self.cfg.outputs.save_physical,
@@ -1048,7 +1080,8 @@ class Generator:
         logger.info(
             f"Num batches:       {'unknown' if loader_len is None else loader_len}"
         )
-        logger.info(f"Ensemble size:     {self.cfg.sampling.ensemble_size}")
+        logger.info("EDM sampler:       %s", self.cfg.sampler.to_metadata())
+        logger.info("Ensemble sampling: %s", asdict(self.cfg.sampling))
         logger.info(f"Max cases:         {self.cfg.limits.max_cases}")
         logger.info(f"Save members:      {self.cfg.outputs.save_members}")
         logger.info(f"Save ens. mean:    {self.cfg.outputs.save_ensemble_mean}")

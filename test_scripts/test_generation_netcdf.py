@@ -25,6 +25,7 @@ from stride_core.configs.config_compiler import ConfigCompiler
 from stride_core.configs.experiment_config import ExperimentConfig
 from stride_core.evaluation.data_loading import EvaluationDataLoader
 from stride_core.generation.generator import GenerationRunConfig, Generator
+from stride_core.generation.training_preview import TrainingPreviewConfig, run_training_preview
 from stride_core.training.ema import EMA
 from test_scripts.test_generation_ema import TinyModel
 from test_scripts.test_generation_physical import make_batch
@@ -116,7 +117,9 @@ class NetCDFGenerationTests(unittest.TestCase):
         }}, config_path=self.root / "generation_run.yaml")
 
     def generator(self, output_format="netcdf", **options):
-        cfg = self.config(output_format, **options)
+        return self.build_generator(self.config(output_format, **options))
+
+    def build_generator(self, cfg):
         with patch("stride_core.generation.generator.AdapterConfig.from_yaml", return_value=SimpleNamespace(static_variables=())), \
              patch.object(Generator, "_build_adapter", return_value=SimpleNamespace(build_dataset=lambda: self.dataset)), \
              patch("stride_core.generation.generator.build_model", side_effect=lambda *_: TinyModel()):
@@ -260,6 +263,132 @@ class NetCDFGenerationTests(unittest.TestCase):
         cfg = self.config("npz", outputs={"save_physical": False, "save_pmm": False}, data={"shuffle": True})
         self.assertFalse(cfg.outputs.save_physical)
         self.assertTrue(cfg.data.shuffle)
+
+    def compile_sampler_overrides(self, overrides):
+        path = Path(__file__).resolve().parents[1] / "configs/experiments/pipeline_norcp_test.yaml"
+        payload = yaml.safe_load(path.read_text())
+        payload["experiment"]["output_root"] = str(self.root)
+        payload["generation"]["overrides"] = overrides
+        return ConfigCompiler(ExperimentConfig.from_dict(payload, config_path=path)).compile()
+
+    def test_rejects_explicit_null_experiment_overrides(self):
+        # A null num_steps currently replaces the base's 56 and silently selects 18.
+        for key in ("num_steps", "sigma_min", "sigma_max", "rho", "S_churn", "S_min", "S_noise"):
+            with self.subTest(key=key), self.assertRaisesRegex(
+                ValueError, rf"generation\.overrides\.generation\.sampler\.{key}.*null",
+            ):
+                self.compile_sampler_overrides({"generation": {"sampler": {key: None}}})
+
+        for generation, path in (
+            ({"num_steps": None}, r"generation\.overrides\.generation\.num_steps"),
+            ({"output": {"return_intermediates": None}}, r"generation\.overrides\.generation\.output\.return_intermediates"),
+        ):
+            with self.subTest(generation=generation), self.assertRaisesRegex(ValueError, path + ".*null"):
+                self.compile_sampler_overrides({"generation": generation})
+
+    def test_unbounded_churn_limit_is_valid_in_compiled_override(self):
+        compiled = self.compile_sampler_overrides({"generation": {"sampler": {"S_max": None}}})
+        run = GenerationRunConfig.from_yaml(compiled.generation_run_config_path)
+        self.assertEqual(run.sampler.S_max, float("inf"))
+        self.assertEqual(run.sampler.num_steps, 56)
+
+    def test_conflicting_flat_override_is_rejected_against_nested_base(self):
+        with self.assertRaisesRegex(ValueError, "Conflicting sampler values for 'num_steps'"):
+            self.compile_sampler_overrides({"generation": {"num_steps": 9}})
+
+    def test_standalone_run_accepts_only_agreeing_legacy_sampler_copies(self):
+        compiled = self.compile_sampler_overrides({"generation": {"sampler": {"num_steps": 9}}})
+        run_path = compiled.generation_run_config_path
+        run = yaml.safe_load(run_path.read_text())
+        for sampler in ({"num_steps": "9"}, {"num_steps": 9, "S_churn": 2}):
+            with self.subTest(sampler=sampler):
+                run["generation"] = {"sampler": sampler}
+                run_path.write_text(yaml.safe_dump(run))
+                self.assertEqual(GenerationRunConfig.from_yaml(run_path).sampler.num_steps, 9)
+        run["generation"] = {"sampler": {"num_steps": 12}}
+        run_path.write_text(yaml.safe_dump(run))
+        with self.assertRaisesRegex(ValueError, r"generation.sampler.*num_steps.*referenced"):
+            GenerationRunConfig.from_yaml(run_path)
+
+    def test_compiled_sampler_reaches_ensemble_preview_and_provenance(self):
+        path = Path(__file__).resolve().parents[1] / "configs/experiments/pipeline_norcp_test.yaml"
+        payload = yaml.safe_load(path.read_text())
+        payload["experiment"]["output_root"] = str(self.root)
+        payload["stages"]["evaluation"] = False
+        generation_base = yaml.safe_load((path.parents[1] / "generation/generation_base.yaml").read_text())
+        generation_base["generation"]["sampler"] = {"num_steps": 30, "sigma_max": 70}
+        base_path = self.root / "generation_override_base.yaml"
+        base_path.write_text(yaml.safe_dump(generation_base))
+        payload["bases"]["generation"] = str(base_path)
+        payload["generation"]["overrides"] = {
+            "generation": {
+                "sampler": {"num_steps": 9, "S_churn": 0.5},
+                "output": {"return_intermediates": True},
+            },
+            "generation_run": {
+                "checkpoint": {"mode": "explicit", "path": str(self.checkpoint_path)},
+                "data": {"batch_size": 2}, "limits": {"max_cases": 2},
+                "sampling": {"ensemble_size": 3, "use_fixed_seed": True, "base_seed": 19},
+                "outputs": {"output_format": "netcdf"},
+                "device": {"accelerator": "cpu"},
+            },
+        }
+        compiled = ConfigCompiler(ExperimentConfig.from_dict(payload, config_path=path)).compile()
+        self.assertEqual(set(yaml.safe_load(compiled.generation_base_config_path.read_text())), {"generation"})
+        self.assertEqual(set(yaml.safe_load(compiled.generation_run_config_path.read_text())), {"generation_run"})
+        generator = self.build_generator(GenerationRunConfig.from_yaml(compiled.generation_run_config_path))
+        training = yaml.safe_load(compiled.training_run_config_path.read_text())["training"]
+        preview_cfg = TrainingPreviewConfig.from_dict({"generation_preview": {"save_plots": False}})
+
+        seeds = []
+
+        def sample(model, condition, **kwargs):
+            seeds.append(torch.initial_seed())
+            final = torch.zeros(condition.shape[0], 1, 2, 2)
+            return {"sample": final, "trajectory": [torch.ones_like(final)]}
+
+        with patch("stride_core.generation.generation_utils.edm_sampler", side_effect=sample) as sampler:
+            with self.assertLogs("stride_core.generation.generator", level="INFO") as logs:
+                generator.run()
+            self.assertEqual(sampler.call_count, 3)
+            self.assertEqual(seeds, [19, 20, 21])
+            preview = run_training_preview(
+                model=generator.model, val_dataset=self.dataset,
+                generation_config_path=training["configs"]["generation_config"],
+                output_dir=self.root, epoch=0, device=torch.device("cpu"),
+                preview_config=preview_cfg,
+            )
+            self.assertEqual(sampler.call_count, 4)
+
+        expected = {
+            "num_steps": 9, "sigma_min": 0.002, "sigma_max": 70., "rho": 7.,
+            "S_churn": 0.5, "S_min": 40., "S_max": 80., "S_noise": 1.,
+            "return_intermediates": True,
+        }
+        for call in sampler.call_args_list:
+            self.assertEqual(
+                {k: v for k, v in call.kwargs.items() if k not in {"cond_static", "y", "variable_labels"}},
+                expected,
+            )
+        torch.testing.assert_close(preview["generated"], torch.zeros(1, 1, 2, 2))
+        self.assertIn(f"EDM sampler:       {expected}", "\n".join(logs.output))
+        metadata = json.loads(generator.metadata_path.read_text())
+        self.assertEqual(metadata["sampler"], expected)
+        self.assertEqual(metadata["sampling"], {"ensemble_size": 3, "use_fixed_seed": True, "base_seed": 19})
+        with xr.open_dataset(generator.output_dir / "netcdf/ensemble_members.nc") as dataset:
+            self.assertEqual(json.loads(dataset.attrs["sampler"]), expected)
+            self.assertEqual(json.loads(dataset.attrs["sampling"]), metadata["sampling"])
+        self.assertEqual(json.loads(Path(preview["metadata_path"]).read_text())["sampler"], expected)
+
+    def test_rejects_misplaced_sampler_settings_in_compiled_and_standalone_runs(self):
+        for section, key in (("sampling", "S_churn"), ("data", "num_steps")):
+            with self.subTest(section=section, key=key):
+                message = rf"generation_run.{section}.*{key}"
+                run = {"generation_run": {section: {key: 1}}}
+                with self.assertRaisesRegex(ValueError, message):
+                    self.compile_sampler_overrides(run)
+                with self.assertRaisesRegex(ValueError, message):
+                    GenerationRunConfig.from_dict(run, config_path=self.root / "invalid.yaml")
 
     def test_pipeline_rejects_netcdf_with_evaluation_but_allows_export(self):
         path = Path(__file__).resolve().parents[1] / "configs/experiments/pipeline_norcp_test.yaml"
