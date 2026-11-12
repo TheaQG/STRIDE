@@ -17,99 +17,14 @@ Current scope
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypedDict
 
 import numpy as np
 import torch
-import yaml
 
+from stride_core.configs.generation_config import GenerationConfig
 from stride_core.generation.edm_sampler import edm_sampler
-
-
-@dataclass(frozen=True)
-class GenerationConfig:
-    """
-    Minimal generation configuration extracted from the generation YAML.
-    """
-
-    num_steps: int
-    sigma_min: float
-    sigma_max: float
-    rho: float
-    S_churn: float
-    S_min: float
-    S_max: float
-    S_noise: float
-    return_intermediates: bool
-
-    @classmethod
-    def from_yaml(cls, generation_config_path: str | Path) -> "GenerationConfig":
-        path = Path(generation_config_path)
-        if not path.exists():
-            raise FileNotFoundError(f"Generation config does not exist: {path}")
-
-        with open(path, "r", encoding="utf-8") as f:
-            cfg = yaml.safe_load(f)
-
-        if not isinstance(cfg, dict):
-            raise ValueError(
-                f"Expected generation config YAML to load into a dict, got {type(cfg)}"
-            )
-
-        return cls.from_dict(cfg)
-
-    @classmethod
-    def from_dict(cls, cfg: dict[str, Any]) -> "GenerationConfig":
-        gen_cfg = cfg.get("generation", cfg)
-        if not isinstance(gen_cfg, dict):
-            raise ValueError("Expected generation config to be a dict")
-
-        num_steps = int(gen_cfg.get("num_steps", 18))
-        sigma_min = float(gen_cfg.get("sigma_min", 0.002))
-        sigma_max = float(gen_cfg.get("sigma_max", 80.0))
-        rho = float(gen_cfg.get("rho", 7.0))
-        s_churn = float(gen_cfg.get("S_churn", 0.0))
-        s_min = float(gen_cfg.get("S_min", 0.0))
-        s_max_raw = gen_cfg.get("S_max", float("inf"))
-        s_max = float("inf") if s_max_raw in {"inf", "INF", None} else float(s_max_raw)
-        s_noise = float(gen_cfg.get("S_noise", 1.0))
-        return_intermediates = bool(gen_cfg.get("return_intermediates", False))
-
-        if num_steps <= 0:
-            raise ValueError(f"generation.num_steps must be > 0, got {num_steps}")
-        if sigma_min <= 0:
-            raise ValueError(f"generation.sigma_min must be > 0, got {sigma_min}")
-        if sigma_max <= 0:
-            raise ValueError(f"generation.sigma_max must be > 0, got {sigma_max}")
-        if rho <= 0:
-            raise ValueError(f"generation.rho must be > 0, got {rho}")
-
-        return cls(
-            num_steps=num_steps,
-            sigma_min=sigma_min,
-            sigma_max=sigma_max,
-            rho=rho,
-            S_churn=s_churn,
-            S_min=s_min,
-            S_max=s_max,
-            S_noise=s_noise,
-            return_intermediates=return_intermediates,
-        )
-
-    def to_sampler_kwargs(self) -> dict[str, Any]:
-        return {
-            "num_steps": self.num_steps,
-            "sigma_min": self.sigma_min,
-            "sigma_max": self.sigma_max,
-            "rho": self.rho,
-            "S_churn": self.S_churn,
-            "S_min": self.S_min,
-            "S_max": self.S_max,
-            "S_noise": self.S_noise,
-            "return_intermediates": self.return_intermediates,
-        }
 
 
 def load_generation_config(
@@ -421,8 +336,8 @@ def generate_batch(
             return_intermediates=False,
         )
 
-    so this wrapper should stay explicit rather than trying multiple legacy call
-    variants.
+    This wrapper always returns the final sample. When intermediates are
+    requested, the sampler collects them but this wrapper does not persist them.
     """
     gen_cfg = load_generation_config(generation_config)
     batch = move_batch_to_device(batch, device)

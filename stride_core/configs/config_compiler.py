@@ -36,6 +36,7 @@ import logging
 import yaml
 
 from stride_core.configs.experiment_config import ExperimentConfig
+from stride_core.configs.generation_config import GenerationConfig
 
 logger = logging.getLogger(__name__)
 
@@ -1025,7 +1026,7 @@ class ConfigCompiler:
             }
         }
 
-        self._deep_update(config, copy.deepcopy(self.cfg.generation.overrides))
+        self._deep_update(config["generation_run"], self.cfg.generation.overrides.get("generation_run", {}))
 
         run_cfg = config["generation_run"]
         run_cfg["name"] = run_name
@@ -1239,30 +1240,12 @@ class ConfigCompiler:
             self._deep_update(resolved, copy.deepcopy(base_generation))
 
         # 3) experiment overrides
-        if isinstance(self.cfg.generation.overrides, dict):
-            self._deep_update(resolved, copy.deepcopy(self.cfg.generation.overrides))
+        overrides = self.cfg.generation.overrides
+        GenerationConfig.validate_experiment_overrides(overrides)
+        if "generation" in overrides:
+            self._deep_update(resolved, {"generation": overrides["generation"]})
 
-        # --- Validation ---
-        sampler = self._nested_get(resolved, ["generation", "sampler"], default={})
-
-        required = ["num_steps", "sigma_min", "sigma_max", "rho"]
-        for key in required:
-            if sampler.get(key) is None:
-                raise ValueError(
-                    f"Sampler parameter '{key}' is None after resolution. "
-                    "Check sampler_base.yaml and generation_base.yaml."
-                )
-
-        self._log(
-            "Resolved sampler parameters: "
-            f"num_steps={sampler.get('num_steps')}, "
-            f"sigma_min={sampler.get('sigma_min')}, "
-            f"sigma_max={sampler.get('sigma_max')}, "
-            f"rho={sampler.get('rho')}, "
-            f"S_churn={sampler.get('S_churn')}, "
-            f"S_min={sampler.get('S_min')}, "
-            f"S_max={sampler.get('S_max')}, "
-            f"S_noise={sampler.get('S_noise')}"
-        )
+        sampler = GenerationConfig.from_dict(resolved)
+        self._log(f"Resolved EDM sampler parameters: {sampler.to_metadata()}")
 
         return resolved

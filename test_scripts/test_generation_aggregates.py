@@ -13,6 +13,7 @@ import numpy as np
 import torch
 
 from stride_core.evaluation.data_loading import EvaluationDataLoader
+from stride_core.configs.generation_config import GenerationConfig
 from stride_core.generation.generator import Generator
 from stride_core.generation.output_saving import save_aggregate
 from stride_core.generation.pmm import pmm_from_ensemble
@@ -57,7 +58,7 @@ class GenerationAggregateTests(unittest.TestCase):
         generator.adapter_cfg = SimpleNamespace(static_variables=("lsm", "topo"))
         generator.cfg = SimpleNamespace(
             sampling=SimpleNamespace(ensemble_size=ensemble_size, use_fixed_seed=False),
-            paths=SimpleNamespace(generation_config_path=Path("unused.yaml")),
+            sampler=GenerationConfig(),
             outputs=SimpleNamespace(
                 save_members=save_members, save_ensemble_mean=save_mean, save_pmm=save_pmm,
                 save_physical=save_physical, save_metadata=True, storage_mode=storage_mode,

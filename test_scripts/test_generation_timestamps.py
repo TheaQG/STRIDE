@@ -15,6 +15,7 @@ import numpy as np
 import torch
 
 from stride_core.evaluation.data_loading import EvaluationDataLoader
+from stride_core.configs.generation_config import GenerationConfig
 from stride_core.generation.generator import Generator
 from stride_core.generation.output_saving import case_output_dir
 from stride_core.training.data import stride_collate_fn
@@ -72,7 +73,7 @@ class GenerationTimestampTests(unittest.TestCase):
         generator.device = torch.device("cpu")
         generator.cfg = SimpleNamespace(
             sampling=SimpleNamespace(ensemble_size=2, use_fixed_seed=False),
-            paths=SimpleNamespace(generation_config_path=Path("unused.yaml")),
+            sampler=GenerationConfig(),
             outputs=SimpleNamespace(
                 save_members=True,
                 save_ensemble_mean=True,

@@ -29,9 +29,10 @@ The first milestone for this file is a clean, trustworthy path from:
 from __future__ import annotations
 
 from contextlib import nullcontext
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
+import json
 import logging
 import torch
 from torch.utils.data import DataLoader
@@ -41,6 +42,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 from stride_core.configs.adapter_config import AdapterConfig
+from stride_core.configs.generation_config import GenerationConfig
 from stride_core.generation.generation_utils import (
     build_preview_payload,
     generate_batch,
@@ -56,6 +58,7 @@ from stride_core.generation.output_saving import (
 )
 from stride_core.generation.pmm import pmm_from_ensemble
 from stride_core.models.build_model import build_model
+from stride_core.training.checkpoints import _strip_parallel_prefix
 from stride_core.training.data import build_dataset_adapter, stride_collate_fn
 
 if TYPE_CHECKING:
@@ -124,6 +127,7 @@ class GenerationRunConfig:
     checkpoint: CheckpointSelectionConfig
     data: GenerationDataConfig
     sampling: GenerationSamplingConfig
+    sampler: GenerationConfig
     limits: GenerationLimitsConfig
     outputs: GenerationOutputConfig
     config_path: Path
@@ -155,6 +159,12 @@ class GenerationRunConfig:
         if not isinstance(run_cfg, dict):
             raise ValueError("Expected generation run config to be a dict")
 
+        GenerationConfig.validate_run_placement(run_cfg)
+        if "generation_run" in cfg:
+            GenerationConfig.validate_run_placement(
+                {key: value for key, value in cfg.items() if key not in {"generation", "generation_run"}},
+                "generation-run config root",
+            )
         paths_cfg = run_cfg.get("paths", run_cfg.get("configs", {}))
         if not isinstance(paths_cfg, dict):
             raise ValueError(
@@ -186,6 +196,24 @@ class GenerationRunConfig:
             raise ValueError(
                 f"Expected generation base config YAML to decode into a dict, got {type(generation_base_cfg)}"
             )
+
+        sampler = GenerationConfig.from_dict(generation_base_cfg)
+        if "generation_run" in cfg and "generation" in cfg:
+            # Older compilers copied a partial generation override into the run YAML.
+            try:
+                duplicate = GenerationConfig.from_dict({"generation": cfg["generation"]}, fallback=sampler)
+            except ValueError as exc:
+                raise ValueError(f"Invalid generation block in run YAML {config_path}: {exc}") from exc
+            differences = [
+                key for key, value in duplicate.to_sampler_kwargs().items()
+                if value != getattr(sampler, key)
+            ]
+            if differences:
+                raise ValueError(
+                    f"Conflicting generation.sampler settings in run YAML {config_path}: "
+                    f"{', '.join(differences)} disagree with referenced base {generation_config_path}. "
+                    "Put sampler settings in the referenced base and remove the duplicate block."
+                )
 
         base_generation_cfg = generation_base_cfg.get("generation", generation_base_cfg)
         if not isinstance(base_generation_cfg, dict):
@@ -306,6 +334,7 @@ class GenerationRunConfig:
                 use_fixed_seed=bool(sampling_cfg.get("use_fixed_seed", False)),
                 base_seed=int(sampling_cfg.get("base_seed", 42)),
             ),
+            sampler=sampler,
             limits=GenerationLimitsConfig(
                 max_cases=max_cases,
             ),
@@ -477,6 +506,9 @@ class Generator:
                 "run_name": self.cfg.run_name,
                 "checkpoint_path": str(self.checkpoint_path),
                 "use_ema_weights": self.cfg.checkpoint.use_ema_weights,
+                "weight_source": self.weight_source,
+                "sampler": json.dumps(self.cfg.sampler.to_metadata()),
+                "sampling": json.dumps(asdict(self.cfg.sampling)),
                 "dataset_config": str(self.cfg.paths.dataset_config_path),
                 "generation_run_config": str(self.cfg.config_path),
                 "split": self.cfg.data.split,
@@ -583,19 +615,122 @@ class Generator:
             )
         return path
 
-    def _looks_like_model_state_dict(self, payload: Any) -> bool:
-        if not isinstance(payload, dict) or len(payload) == 0:
-            return False
-        return all(isinstance(key, str) for key in payload.keys()) and any(
-            isinstance(value, torch.Tensor) for value in payload.values()
-        )
+    @staticmethod
+    def _ema_tensor_copies(
+        shadows: Any, targets: dict[str, torch.Tensor], label: str, *, floating_only: bool = False,
+    ) -> list[tuple[torch.Tensor, torch.Tensor]]:
+        if not isinstance(shadows, dict) or not all(isinstance(name, str) for name in shadows):
+            raise ValueError(f"Invalid {label}: expected a dictionary keyed by tensor name")
 
-    def _try_load_state_dict_candidate(self, candidate: Any) -> bool:
-        if not self._looks_like_model_state_dict(candidate):
-            return False
-        self.model.load_state_dict(candidate)
-        return True
+        copies = []
+        for name, shadow in _strip_parallel_prefix(shadows).items():
+            if name not in targets:
+                raise ValueError(f"Invalid {label}: unknown tensor {name!r}")
+            target = targets[name]
+            if not isinstance(shadow, torch.Tensor):
+                raise ValueError(f"Invalid {label}: {name!r} must be a tensor")
+            if floating_only and not shadow.is_floating_point():
+                raise ValueError(f"Invalid {label}: {name!r} has non-floating dtype {shadow.dtype}")
+            if floating_only and (shadow.is_meta or shadow.layout != target.layout):
+                raise ValueError(f"Invalid {label}: {name!r} must have storage and layout {target.layout}")
+            if shadow.shape != target.shape:
+                raise ValueError(
+                    f"Invalid {label}: {name!r} has shape {tuple(shadow.shape)}, "
+                    f"expected {tuple(target.shape)}"
+                )
+            copies.append((target, shadow))
+        return copies
 
+    @staticmethod
+    def _raw_weight_state(checkpoint: dict[str, Any]) -> dict[str, Any] | None:
+        for key in ("model_state_dict", "model"):
+            state = checkpoint.get(key)
+            if (
+                isinstance(state, dict)
+                and all(isinstance(name, str) for name in state)
+                and any(isinstance(value, torch.Tensor) for value in state.values())
+            ):
+                return _strip_parallel_prefix(state)
+        return None
+
+    def _load_flat_ema(self, state: dict[str, Any], label: str) -> None:
+        if not all(isinstance(name, str) for name in state):
+            raise ValueError(f"Invalid {label}: expected string state keys")
+        state = _strip_parallel_prefix(state)
+        expected = self.model.state_dict()
+        missing = expected.keys() - state.keys()
+        unexpected = state.keys() - expected.keys()
+        if missing or unexpected:
+            raise ValueError(
+                f"Invalid {label}: missing keys {sorted(missing)}, "
+                f"unexpected keys {sorted(unexpected)}"
+            )
+        tensors = {name: value for name, value in expected.items() if isinstance(value, torch.Tensor)}
+        self._ema_tensor_copies({name: state[name] for name in tensors}, tensors, label)
+        self.model.load_state_dict(state)
+
+    def _load_ema_shadows(
+        self, ema: dict[str, Any], label: str, raw_state: dict[str, Any] | None,
+    ) -> None:
+        params: dict[str, torch.Tensor] = dict(self.model.named_parameters())
+        buffers = dict(self.model.named_buffers())
+        shadows = ema.get("shadow_params")
+        current_format = label == "ema_state_dict"
+        if current_format:
+            track_buffers = ema.get("track_buffers")
+            if not isinstance(track_buffers, bool):
+                raise ValueError(f"Invalid {label}.track_buffers: expected a boolean")
+            params = {
+                name: param for name, param in params.items()
+                if param.requires_grad and param.is_floating_point()
+            }
+            buffers = {
+                name: buffer for name, buffer in buffers.items()
+                if track_buffers and buffer.is_floating_point()
+            }
+            shadow_buffers = ema.get("shadow_buffers")
+        else:
+            shadow_buffers = ema.get("shadow_buffers", {})
+            if isinstance(shadows, dict) and all(isinstance(name, str) for name in shadows):
+                # A complete legacy state takes precedence even when raw weights are present.
+                state = _strip_parallel_prefix(shadows)
+                if state.keys() == self.model.state_dict().keys():
+                    copies = self._ema_tensor_copies(shadow_buffers, buffers, f"{label}.shadow_buffers")
+                    self._load_flat_ema(shadows, f"{label}.shadow_params")
+                    for target, shadow in copies:
+                        target.copy_(shadow)
+                    return
+            params.update(buffers)
+
+        # Validate both maps before loading the raw state or changing any tensors.
+        copies = []
+        for key, shadow_map, targets, names_key in (
+            ("shadow_params", shadows, params, "tracked_param_names"),
+            ("shadow_buffers", shadow_buffers, buffers, "tracked_buffer_names"),
+        ):
+            copies.extend(self._ema_tensor_copies(
+                shadow_map, targets, f"{label}.{key}", floating_only=current_format,
+            ))
+            if current_format or names_key in ema:
+                names = ema.get(names_key)
+                if not isinstance(names, (list, tuple)) or not all(isinstance(name, str) for name in names):
+                    raise ValueError(f"Invalid {label}.{names_key}: expected a list of tensor names")
+                normalized_names = _strip_parallel_prefix(dict.fromkeys(names))
+                if (
+                    len(names) != len(normalized_names)
+                    or normalized_names.keys() != _strip_parallel_prefix(shadow_map).keys() # type: ignore
+                ):
+                    raise ValueError(f"Invalid {label}.{key}: tensor names do not match {names_key}")
+        if not copies:
+            raise ValueError(f"Invalid {label}: no EMA shadow tensors")
+        if raw_state is None:
+            raise KeyError(f"{label} shadows require 'model_state_dict' or legacy 'model'")
+        self.model.load_state_dict(raw_state)
+        # Copy into live tensors, including non-persistent buffers, like EMA.copy_to.
+        for target, shadow in copies:
+            target.copy_(shadow)
+
+    @torch.no_grad()
     def _load_checkpoint_into_model(self, checkpoint_path: Path) -> dict[str, Any]:
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
         if not isinstance(checkpoint, dict):
@@ -603,35 +738,32 @@ class Generator:
                 f"Expected checkpoint to load into a dict, got {type(checkpoint)}"
             )
 
-        state_dict_loaded = False
-
+        ema_key = "ema_state_dict"
+        ema_state = None
         if self.cfg.checkpoint.use_ema_weights:
-            ema_state_dict = checkpoint.get("ema_state_dict")
-            state_dict_loaded = self._try_load_state_dict_candidate(ema_state_dict)
+            ema_state = checkpoint.get(ema_key)
+            if ema_state is None:
+                ema_key = "ema"
+                ema_state = checkpoint.get(ema_key)
 
-            if not state_dict_loaded:
-                ema_payload = checkpoint.get("ema")
-                if isinstance(ema_payload, dict):
-                    shadow_params = ema_payload.get("shadow_params")
-                    state_dict_loaded = self._try_load_state_dict_candidate(
-                        shadow_params
-                    )
-
-        if not state_dict_loaded:
-            model_state_dict = checkpoint.get("model_state_dict")
-            state_dict_loaded = self._try_load_state_dict_candidate(model_state_dict)
-
-        if not state_dict_loaded:
-            model_payload = checkpoint.get("model")
-            state_dict_loaded = self._try_load_state_dict_candidate(model_payload)
-
-        if not state_dict_loaded:
-            available_keys = sorted(str(key) for key in checkpoint.keys())
-            raise KeyError(
-                "Could not find a loadable model state in checkpoint. Tried keys: "
-                "'ema_state_dict', 'ema.shadow_params', 'model_state_dict', 'model'. "
-                f"Available top-level keys: {available_keys}"
-            )
+        raw_state = self._raw_weight_state(checkpoint)
+        if ema_state is None:
+            if raw_state is None:
+                raise KeyError("Checkpoint has no loadable 'model_state_dict' or legacy 'model'")
+            self.model.load_state_dict(raw_state)
+            self.weight_source = "raw"
+            if self.cfg.checkpoint.use_ema_weights:
+                logger.warning(
+                    "EMA weights requested but absent from %s. Using raw weights.", checkpoint_path,
+                )
+        else:
+            if not isinstance(ema_state, dict) or not ema_state:
+                raise ValueError(f"Invalid {ema_key}: expected a non-empty dictionary")
+            if ema_key == "ema" or "shadow_params" in ema_state or "shadow_buffers" in ema_state:
+                self._load_ema_shadows(ema_state, ema_key, raw_state)
+            else:
+                self._load_flat_ema(ema_state, ema_key)
+            self.weight_source = "ema"
 
         self.model.eval()
         return checkpoint
@@ -668,7 +800,7 @@ class Generator:
             generated = generate_batch(
                 self.model,
                 batch,
-                generation_config=self.cfg.paths.generation_config_path,
+                generation_config=self.cfg.sampler,
                 device=self.device,
             )
             if not isinstance(generated, torch.Tensor):
@@ -891,9 +1023,12 @@ class Generator:
             checkpoint_mode=self.cfg.checkpoint.mode,
             checkpoint_path=self.checkpoint_path,
             use_ema_weights=self.cfg.checkpoint.use_ema_weights,
+            weight_source=self.weight_source,
             split=self.cfg.data.split,
             batch_size=self.cfg.data.batch_size,
             ensemble_size=self.cfg.sampling.ensemble_size,
+            sampler=self.cfg.sampler.to_metadata(),
+            sampling=asdict(self.cfg.sampling),
             max_cases=self.cfg.limits.max_cases,
             device=str(self.device),
             save_physical=self.cfg.outputs.save_physical,
@@ -978,10 +1113,12 @@ class Generator:
         logger.info(
             f"Num batches:       {'unknown' if loader_len is None else loader_len}"
         )
-        logger.info(f"Ensemble size:     {self.cfg.sampling.ensemble_size}")
+        logger.info("EDM sampler:       %s", self.cfg.sampler.to_metadata())
+        logger.info("Ensemble sampling: %s", asdict(self.cfg.sampling))
         logger.info(f"Max cases:         {self.cfg.limits.max_cases}")
         logger.info(f"Save members:      {self.cfg.outputs.save_members}")
         logger.info(f"Save ens. mean:    {self.cfg.outputs.save_ensemble_mean}")
         logger.info(f"Save PMM:          {self.cfg.outputs.save_pmm}")
         logger.info(f"Storage mode:      {self.cfg.outputs.storage_mode}")
-        logger.info(f"Use EMA weights:   {self.cfg.checkpoint.use_ema_weights}")
+        logger.info(f"Requested EMA:     {self.cfg.checkpoint.use_ema_weights}")
+        logger.info(f"Weight source:     {self.weight_source}")
