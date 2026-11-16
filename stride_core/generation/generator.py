@@ -38,6 +38,7 @@ import torch
 from torch.utils.data import DataLoader
 import yaml
 import numpy as np
+import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -488,7 +489,16 @@ class Generator:
         if not isinstance(self.dataset, NorCPDataset):
             raise ValueError("NetCDF generation currently supports the NorCP adapter only")
         if self.samples_dir.exists():
-            raise FileExistsError("Use a new output directory for NetCDF; an existing samples/ directory was found")
+            #raise FileExistsError("Use a new output directory for NetCDF; an existing samples/ directory was found")
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_dir = Path(self.output_dir) / f"samples_old_{timestamp}"
+            print(
+                f"Existing samples directory found. Backing it up to {backup_dir}..."
+            )
+            self.samples_dir.rename(backup_dir)
+        # Create fresh directory
+        self.samples_dir.mkdir(parents=True, exist_ok=True)
+
         case_count = len(self.dataset)
         if self.cfg.limits.max_cases is not None:
             case_count = min(case_count, self.cfg.limits.max_cases)
@@ -818,6 +828,7 @@ class Generator:
                 )
 
         #print('_generate_for_batch: batch_idx=', batch_idx)
+        #print('_generate_for_batch: case_offset=', case_offset)
         for case_idx in range(batch_size):
             case_batch = self._slice_batch(batch, case_idx)
             if netcdf_writer is not None:
@@ -913,6 +924,7 @@ class Generator:
     ) -> None:
         """Convert members first, then aggregate and append one physical record."""
         reference = self._netcdf_reference_metadata
+        #print('dataset_index =', dataset_index)
         metadata = reference if dataset_index == 0 else self.dataset.get_output_metadata(dataset_index)
         timestamp = self._get_batch_meta_list(batch, "timestamp", 1)[0]
         if timestamp != metadata.aligned_timestamp.isoformat():

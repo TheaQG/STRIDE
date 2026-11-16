@@ -40,6 +40,7 @@ import re
 import cftime
 import netCDF4 as nc
 import numpy as np
+import shutil
 
 
 PRODUCTS = ("ensemble_members", "ensemble_mean", "pmm")
@@ -164,8 +165,19 @@ class NetCDFWriter:
         self._last_time: float | None = None
 
         if os.path.lexists(self.output_dir) or os.path.lexists(self.incomplete_dir):
-            raise FileExistsError(f"Output or incomplete output already exists for {self.output_dir}")
-        self.output_dir.parent.mkdir(parents=True, exist_ok=True)
+            #raise FileExistsError(f"Output or incomplete output already exists for {self.output_dir}")
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            if os.path.lexists(self.output_dir):
+                backup_path = self.output_dir.with_name(f"{self.output_dir.name}_old_{timestamp}")
+                print(f"Existing NetCDF output found. Backing up to {backup_path}...")
+                self.output_dir.rename(backup_path)
+            if os.path.lexists(self.incomplete_dir):
+                backup_path = self.incomplete_dir.with_name(f"{self.incomplete_dir.name}_old_{timestamp}")
+                print(f"Existing NetCDF incomplete found. Backing up to {backup_path}...")
+                self.incomplete_dir.rename(backup_path)
+
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        #self.output_dir.parent.mkdir(parents=True, exist_ok=True)
         self.incomplete_dir.mkdir()  # Exclusive ownership; also blocks a second writer.
         try:
             for product in PRODUCTS:
@@ -419,7 +431,9 @@ class NetCDFWriter:
             with (self.incomplete_dir / "netcdf_manifest.json").open("x", encoding="utf-8") as stream:
                 json.dump(manifest, stream, indent=2)
             if os.path.lexists(self.output_dir):
-                raise FileExistsError(f"Refusing to replace {self.output_dir}")
+                #raise FileExistsError(f"Refusing to replace {self.output_dir}")
+                print(f"Overwriting existing output directory at {self.output_dir}...")
+                shutil.rmtree(self.output_dir)
             self.incomplete_dir.rename(self.output_dir)
             self.completed = True
         except BaseException:
