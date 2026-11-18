@@ -35,7 +35,7 @@ from __future__ import annotations
 import math
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -49,6 +49,9 @@ from data_adapters.norcp.statistics.io import build_stats_output_path, load_tran
 from data_adapters.norcp.transforms import BaseTransform, build_transform
 from data_adapters.norcp.variable_registry import get_default_transform
 from stride_core.configs.adapter_config import AdapterConfig
+
+if TYPE_CHECKING:
+    from data_adapters.norcp.output_metadata import NorCPOutputMetadata
 
 
 DEFAULT_FLOAT_DTYPE = np.float32
@@ -110,7 +113,8 @@ def build_doy_sincos(
 def build_date_metadata(timestamp_str: str) -> dict[str, Any]:
     dt = parse_iso_timestamp(timestamp_str)
     return {
-        "date": dt.strftime("%Y%m%d"),
+        #"date": dt.strftime("%Y%m%d"),
+        "date": dt.strftime("%Y%m%d%H"),
         "day_of_year": int(dt.timetuple().tm_yday),
         "doy_sin_cos": build_doy_sincos(timestamp_str).tolist(),
     }
@@ -171,6 +175,12 @@ class NorCPDataset(Dataset):
             for timestamp in get_split_timestamps(self.split_manifest, self.split_name)
         ]
 
+        #print('NorCPDataset: self.root_dir:', self.root_dir)
+        #print('NorCPDataset: self.scenario_name:', self.scenario_name)
+        #print('NorCPDataset: self.target_variables:', self.target_variables)
+        #print('NorCPDataset: self.dynamic_variables:', self.dynamic_variables)
+        #print('NorCPDataset: self.temporal_tag:', self.temporal_tag)
+        #print('NorCPDataset: self.target_time_offsets:', self.target_time_offsets)
         self.sample_index = build_norcp_sample_index(
             root_dir=self.root_dir,
             scenario_name=self.scenario_name,
@@ -182,6 +192,9 @@ class NorCPDataset(Dataset):
             target_time_offsets=self.target_time_offsets,
             dynamic_time_offsets=self.dynamic_time_offsets,
         )
+        #print('NorCPDataset: get_split_timestamps(self.split_manifest, self.split_name)', get_split_timestamps(self.split_manifest, self.split_name))
+        #print('NorCPDataset: self.sample_index', self.sample_index)
+        #print('NorCPDataset: sample_entry_get(sample, "timestamp")', sample_entry_get(sample, "timestamp"))
         self._sample_lookup = {
             normalize_timestamp_key(sample_entry_get(sample, "timestamp")): sample
             for sample in self.sample_index
@@ -224,6 +237,28 @@ class NorCPDataset(Dataset):
 
     def __len__(self) -> int:
         return len(self.timestamps)
+
+    def get_output_metadata(self, index: int) -> NorCPOutputMetadata:
+        """Read target export metadata on demand, outside normal sample loading.
+
+        A temporal NetCDF stack needs one fixed grid. Full-domain and fixed
+        crops are supported; spatially shuffled crops are not.
+        """
+        from data_adapters.norcp.output_metadata import load_output_metadata
+
+        if self.spatial_shuffle:
+            raise ValueError("NetCDF output metadata requires spatial_shuffle=False (a fixed grid)")
+        timestamp = self.timestamps[index]
+        sample = self._sample_lookup[timestamp]
+        target_files = sample_entry_get(sample, "target_files", {})
+        return load_output_metadata(
+            file_path=target_files[self.target_variable],
+            variable=self.target_variable,
+            source=self.target_source,
+            aligned_timestamp=parse_iso_timestamp(timestamp),
+            file_time_offset_hours=float(self.target_time_offsets.get(self.target_variable, 0.0)),
+            crop=self.hr_crop_spec,
+        )
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         timestamp = self.timestamps[index]
@@ -387,6 +422,8 @@ class NorCPDataset(Dataset):
 
     def _validate_timestamps_exist(self) -> None:
         missing = [timestamp for timestamp in self.timestamps if timestamp not in self._sample_lookup]
+        #print('_validate_timestamps_exist: self.timestamps:', self.timestamps[:10])
+        #print('_validate_timestamps_exist: self._sample_lookup:', self._sample_lookup)
         if missing:
             raise ValueError(
                 f"Some split timestamps are missing from the NorCP sample index: {missing[:10]}"
@@ -692,6 +729,7 @@ class NorCPAdapter:
         datasets: dict[str, NorCPDataset] = {}
         for split_name in split_names:
             split_cfg = self._clone_cfg_with_split(split_name)
+            #print('NorCPAdapter: split_cfg', split_cfg)
             datasets[split_name] = NorCPDataset(split_cfg)
         return datasets
 

@@ -11,11 +11,11 @@ if str(REPO_ROOT) not in sys.path:
 
 import matplotlib.pyplot as plt
 import torch
-import yaml
 
 from stride_core.configs.adapter_config import AdapterConfig
 from stride_core.configs.config_compiler import ConfigCompiler
 from stride_core.configs.experiment_config import ExperimentConfig
+from stride_core.configs.generation_config import GenerationConfig
 from stride_core.configs.model_config import ModelSpec
 from stride_core.generation.edm_sampler import edm_sampler
 from stride_core.models.build_model import build_model
@@ -96,40 +96,6 @@ def discover_experiment_configs(path_arg: str | None = None) -> list[Path]:
     raise FileNotFoundError(
         f"Experiment config path does not exist: {requested_path}"
     )
-
-
-def _load_generation_kwargs(config_path: Path) -> dict[str, Any]:
-    with open(config_path, "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
-
-    if not isinstance(cfg, dict):
-        raise ValueError(
-            f"Expected generation config to load into a dict, got {type(cfg)}"
-        )
-
-    if "generation" in cfg:
-        generation_cfg = cfg["generation"]
-        if not isinstance(generation_cfg, dict):
-            raise ValueError("Expected 'generation' section to be a dict")
-        sampler_cfg = generation_cfg.get("sampler", generation_cfg)
-    else:
-        sampler_cfg = cfg.get("sampler", cfg)
-
-    if not isinstance(sampler_cfg, dict):
-        raise ValueError("Expected sampler configuration to be a dict")
-
-    kwargs = {
-        "num_steps": int(sampler_cfg.get("num_steps", 18)),
-        "sigma_min": float(sampler_cfg.get("sigma_min", 0.002)),
-        "sigma_max": float(sampler_cfg.get("sigma_max", 80.0)),
-        "rho": float(sampler_cfg.get("rho", 7.0)),
-        "S_churn": float(sampler_cfg.get("S_churn", 0.0)),
-        "S_min": float(sampler_cfg.get("S_min", 0.0)),
-        "S_max": float(sampler_cfg.get("S_max", float("inf"))),
-        "S_noise": float(sampler_cfg.get("S_noise", 1.0)),
-        "return_intermediates": bool(sampler_cfg.get("return_intermediates", False)),
-    }
-    return kwargs
 
 
 def build_batch_from_sample(sample: dict[str, Any]) -> dict[str, Any]:
@@ -402,7 +368,7 @@ def run_test_case(experiment_config_path: Path) -> None:
 
     adapter_cfg = AdapterConfig.from_yaml(dataset_config_path)
     model_spec = ModelSpec.from_yaml(model_config_path)
-    generation_kwargs = _load_generation_kwargs(generation_config_path)
+    generation_kwargs = GenerationConfig.from_yaml(generation_config_path).to_sampler_kwargs()
 
     print("\nLoaded compiled configs successfully.")
     print(adapter_cfg)

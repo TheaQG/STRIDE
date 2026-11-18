@@ -31,12 +31,14 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Sampler
+from torch.utils.data.distributed import DistributedSampler
 import yaml
 
 from data_adapters.danra_era5_small.adapter import DanraEra5SmallAdapter
 from data_adapters.norcp.adapter import NorCPAdapter
 from stride_core.configs.adapter_config import AdapterConfig
+from stride_core.utils.distributed import is_distributed, rank, world_size
 
 
 # -----------------------------------------------------------------------------
@@ -199,6 +201,9 @@ class BuiltTrainingData:
     train_loader: DataLoader[Any]
     val_loader: DataLoader[Any]
 
+    train_sampler: DistributedSampler | None
+    val_sampler: DistributedSampler | None
+
 
 # -----------------------------------------------------------------------------
 # Adapter
@@ -335,6 +340,7 @@ def build_dataloader(
     *,
     batch_size: int,
     shuffle: bool,
+    sampler: Sampler[Any] | None = None,
     num_workers: int,
     pin_memory: bool,
     drop_last: bool,
@@ -347,7 +353,8 @@ def build_dataloader(
     loader_kwargs: dict[str, Any] = {
         "dataset": dataset,
         "batch_size": batch_size,
-        "shuffle": shuffle,
+        "shuffle": shuffle if sampler is None else False,
+        "sampler": sampler,
         "num_workers": num_workers,
         "pin_memory": pin_memory,
         "drop_last": drop_last,
@@ -390,10 +397,27 @@ def build_training_data(training_config_path: str | Path) -> BuiltTrainingData:
     train_dataset = datasets["train"]
     val_dataset = datasets["val"]
 
+    train_sampler: DistributedSampler | None = None
+    val_sampler: DistributedSampler | None = None
+    if is_distributed():
+        train_sampler = DistributedSampler(
+            train_dataset,
+            num_replicas=world_size(),
+            rank=rank(),
+            shuffle=training_data_cfg.shuffle_train,
+        )
+        val_sampler = DistributedSampler(
+            val_dataset,
+            num_replicas=world_size(),
+            rank=rank(),
+            shuffle=training_data_cfg.shuffle_val,
+        )
+
     train_loader = build_dataloader(
         train_dataset,
         batch_size=training_data_cfg.batch_size,
         shuffle=training_data_cfg.shuffle_train,
+        sampler=train_sampler,
         num_workers=training_data_cfg.num_workers,
         pin_memory=training_data_cfg.pin_memory,
         drop_last=training_data_cfg.drop_last_train,
@@ -405,6 +429,7 @@ def build_training_data(training_config_path: str | Path) -> BuiltTrainingData:
         val_dataset,
         batch_size=training_data_cfg.batch_size,
         shuffle=training_data_cfg.shuffle_val,
+        sampler=val_sampler,
         num_workers=training_data_cfg.num_workers,
         pin_memory=training_data_cfg.pin_memory,
         drop_last=training_data_cfg.drop_last_val,
@@ -418,6 +443,8 @@ def build_training_data(training_config_path: str | Path) -> BuiltTrainingData:
         val_dataset=val_dataset,
         train_loader=train_loader,
         val_loader=val_loader,
+        train_sampler=train_sampler,
+        val_sampler=val_sampler,
     )
 
 

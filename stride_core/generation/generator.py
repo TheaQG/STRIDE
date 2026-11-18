@@ -13,7 +13,7 @@ Current scope
 - rebuild the model and load checkpoint weights
 - build the requested dataset split and dataloader
 - generate one or more samples per case
-- save generated outputs as compressed `.npz`
+- save generated outputs as compressed `.npz` or NorCP temporal NetCDF stacks
 - optionally save simple per-case metadata
 
 Intentional non-goals for this first version
@@ -28,21 +28,26 @@ The first milestone for this file is a clean, trustworthy path from:
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from contextlib import nullcontext
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
+import json
 import logging
 import torch
 from torch.utils.data import DataLoader
 import yaml
 import numpy as np
+import datetime
 
 logger = logging.getLogger(__name__)
 
 from stride_core.configs.adapter_config import AdapterConfig
+from stride_core.configs.generation_config import GenerationConfig
 from stride_core.generation.generation_utils import (
     build_preview_payload,
     generate_batch,
+    inverse_transform_target_tensor,
     move_batch_to_device,
 )
 from stride_core.generation.output_saving import (
@@ -54,7 +59,11 @@ from stride_core.generation.output_saving import (
 )
 from stride_core.generation.pmm import pmm_from_ensemble
 from stride_core.models.build_model import build_model
+from stride_core.training.checkpoints import _strip_parallel_prefix
 from stride_core.training.data import build_dataset_adapter, stride_collate_fn
+
+if TYPE_CHECKING:
+    from stride_core.generation.netcdf_output import NetCDFWriter
 
 
 # -----------------------------------------------------------------------------
@@ -119,6 +128,7 @@ class GenerationRunConfig:
     checkpoint: CheckpointSelectionConfig
     data: GenerationDataConfig
     sampling: GenerationSamplingConfig
+    sampler: GenerationConfig
     limits: GenerationLimitsConfig
     outputs: GenerationOutputConfig
     config_path: Path
@@ -150,6 +160,12 @@ class GenerationRunConfig:
         if not isinstance(run_cfg, dict):
             raise ValueError("Expected generation run config to be a dict")
 
+        GenerationConfig.validate_run_placement(run_cfg)
+        if "generation_run" in cfg:
+            GenerationConfig.validate_run_placement(
+                {key: value for key, value in cfg.items() if key not in {"generation", "generation_run"}},
+                "generation-run config root",
+            )
         paths_cfg = run_cfg.get("paths", run_cfg.get("configs", {}))
         if not isinstance(paths_cfg, dict):
             raise ValueError(
@@ -181,6 +197,24 @@ class GenerationRunConfig:
             raise ValueError(
                 f"Expected generation base config YAML to decode into a dict, got {type(generation_base_cfg)}"
             )
+
+        sampler = GenerationConfig.from_dict(generation_base_cfg)
+        if "generation_run" in cfg and "generation" in cfg:
+            # Older compilers copied a partial generation override into the run YAML.
+            try:
+                duplicate = GenerationConfig.from_dict({"generation": cfg["generation"]}, fallback=sampler)
+            except ValueError as exc:
+                raise ValueError(f"Invalid generation block in run YAML {config_path}: {exc}") from exc
+            differences = [
+                key for key, value in duplicate.to_sampler_kwargs().items()
+                if value != getattr(sampler, key)
+            ]
+            if differences:
+                raise ValueError(
+                    f"Conflicting generation.sampler settings in run YAML {config_path}: "
+                    f"{', '.join(differences)} disagree with referenced base {generation_config_path}. "
+                    "Put sampler settings in the referenced base and remove the duplicate block."
+                )
 
         base_generation_cfg = generation_base_cfg.get("generation", generation_base_cfg)
         if not isinstance(base_generation_cfg, dict):
@@ -248,13 +282,21 @@ class GenerationRunConfig:
             )
 
         output_format = str(outputs_cfg.get("output_format", "npz"))
-        if output_format != "npz":
+        if output_format not in {"npz", "netcdf"}:
             raise ValueError(
-                f"Only 'npz' output_format is currently supported, got {output_format!r}"
+                f"output_format must be 'npz' or 'netcdf', got {output_format!r}"
             )
 
         storage_mode = str(outputs_cfg.get("storage_mode", "per_member"))
-        if storage_mode not in {"per_member", "per_member_bundle"}:
+        if output_format == "netcdf":
+            # This first NetCDF mode writes all three products in physical units.
+            for key in ("save_physical", "save_members", "save_ensemble_mean", "save_pmm"):
+                if not bool(outputs_cfg.get(key, True)):
+                    raise ValueError(f"NetCDF output requires outputs.{key}=true")
+            if bool(data_cfg.get("shuffle", False)):
+                raise ValueError("NetCDF output requires data.shuffle=false (chronological order)")
+            storage_mode = "temporal_stack"
+        elif storage_mode not in {"per_member", "per_member_bundle"}:
             raise ValueError(
                 "generation_run.outputs.storage_mode must be one of: "
                 f"'per_member', 'per_member_bundle'. Got {storage_mode!r}."
@@ -293,6 +335,7 @@ class GenerationRunConfig:
                 use_fixed_seed=bool(sampling_cfg.get("use_fixed_seed", False)),
                 base_seed=int(sampling_cfg.get("base_seed", 42)),
             ),
+            sampler=sampler,
             limits=GenerationLimitsConfig(
                 max_cases=max_cases,
             ),
@@ -300,8 +343,8 @@ class GenerationRunConfig:
                 save_members=bool(outputs_cfg.get("save_members", True)),
                 save_metadata=bool(outputs_cfg.get("save_metadata", True)),
                 save_physical=bool(outputs_cfg.get("save_physical", True)),
-                save_ensemble_mean=bool(outputs_cfg.get("save_ensemble_mean", False)),
-                save_pmm=bool(outputs_cfg.get("save_pmm", False)),
+                save_ensemble_mean=bool(outputs_cfg.get("save_ensemble_mean", output_format == "netcdf")),
+                save_pmm=bool(outputs_cfg.get("save_pmm", output_format == "netcdf")),
                 save_plots=bool(outputs_cfg.get("save_plots", False)),
                 output_format=output_format,
                 storage_mode=storage_mode,
@@ -356,7 +399,8 @@ class Generator:
 
         self.device = self._resolve_device(self.cfg.device_accelerator)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.samples_dir.mkdir(parents=True, exist_ok=True)
+        if self.cfg.outputs.output_format == "npz":
+            self.samples_dir.mkdir(parents=True, exist_ok=True)
 
         self.adapter_cfg = AdapterConfig.from_yaml(self.cfg.paths.dataset_config_path)
         self.adapter = self._build_adapter()
@@ -376,25 +420,57 @@ class Generator:
     @torch.no_grad()
     def run(self) -> None:
         self._print_run_summary()
-        self._save_run_metadata()
+        output_context = (
+            self._create_netcdf_writer()
+            if self.cfg.outputs.output_format == "netcdf" else nullcontext()
+        )
+        # The NetCDF context publishes only after all requested cases succeed.
+        with output_context as netcdf_writer:
+            self._save_run_metadata()
+            generated_case_count = 0
 
-        generated_case_count = 0
-        for batch_idx, batch in enumerate(self.loader):
-            if (
-                self.cfg.limits.max_cases is not None
-                and generated_case_count >= self.cfg.limits.max_cases
-            ):
-                break
+            """
+            #print('run: self.loader=', self.loader)
+            loader = self.loader
+            ds = loader.dataset
+            print("=== DataLoader ===")
+            print(f"  batch_size:         {loader.batch_size}")
+            print(f"  num_workers:        {loader.num_workers}")
+            print(f"  pin_memory:         {loader.pin_memory}")
+            print(f"  drop_last:          {loader.drop_last}")
+            print(f"  shuffle:            {isinstance(loader.sampler, torch.utils.data.RandomSampler)}")
+            print(f"  persistent_workers: {loader.persistent_workers}")
+            print(f"  prefetch_factor:    {loader.prefetch_factor if loader.num_workers > 0 else 'N/A'}")
+            print(f"  collate_fn:         {loader.collate_fn}")
 
-            batch = move_batch_to_device(batch, self.device)
-            processed_cases = self._generate_for_batch(
-                batch,
-                batch_idx=batch_idx,
-                remaining_cases=None
-                if self.cfg.limits.max_cases is None
-                else self.cfg.limits.max_cases - generated_case_count,
-            )
-            generated_case_count += processed_cases
+            print("\n=== Dataset ===")
+            print(f"  type:               {type(ds).__name__}")
+            print(f"  len:                {len(ds)}")
+            print(f"dataset: len={len(ds)}, sample_keys={list(ds[0].keys())}, shapes={ {k: v.shape if hasattr(v, 'shape') else type(v).__name__ for k, v in ds[0].items()} }")
+            """
+            for batch_idx, batch in enumerate(self.loader):
+                if (
+                    self.cfg.limits.max_cases is not None
+                    and generated_case_count >= self.cfg.limits.max_cases
+                ):
+                    break
+
+                #print('run: batch_idx=', batch_idx)
+                #print('run: processed_cases=', processed_cases)
+                #print('run: generated_case_count=', generated_case_count)
+                #print('run: self.cfg.limits.max_cases=', self.cfg.limits.max_cases)
+
+                batch = move_batch_to_device(batch, self.device)
+                processed_cases = self._generate_for_batch(
+                    batch,
+                    batch_idx=batch_idx,
+                    remaining_cases=None
+                    if self.cfg.limits.max_cases is None
+                    else self.cfg.limits.max_cases - generated_case_count,
+                    netcdf_writer=netcdf_writer,
+                    case_offset=generated_case_count,
+                )
+                generated_case_count += processed_cases
 
         if self.cfg.outputs.save_plots:
             logger.info(
@@ -404,6 +480,54 @@ class Generator:
     # ------------------------------------------------------------------
     # Setup helpers
     # ------------------------------------------------------------------
+
+    def _create_netcdf_writer(self) -> NetCDFWriter:
+        """Open one temporal stack for this NorCP run; never create NPZ output."""
+        from data_adapters.norcp.adapter import NorCPDataset
+        from stride_core.generation.netcdf_output import NetCDFWriter
+
+        if not isinstance(self.dataset, NorCPDataset):
+            raise ValueError("NetCDF generation currently supports the NorCP adapter only")
+        if self.samples_dir.exists():
+            #raise FileExistsError("Use a new output directory for NetCDF; an existing samples/ directory was found")
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_dir = Path(self.output_dir) / f"samples_old_{timestamp}"
+            print(
+                f"Existing samples directory found. Backing it up to {backup_dir}..."
+            )
+            self.samples_dir.rename(backup_dir)
+        # Create fresh directory
+        self.samples_dir.mkdir(parents=True, exist_ok=True)
+
+        case_count = len(self.dataset)
+        if self.cfg.limits.max_cases is not None:
+            case_count = min(case_count, self.cfg.limits.max_cases)
+        if case_count == 0:
+            raise ValueError("Cannot generate a NetCDF stack from an empty dataset")
+        metadata = self.dataset.get_output_metadata(0)
+        self._netcdf_reference_metadata = metadata
+        return NetCDFWriter(
+            self.output_dir / "netcdf",
+            variable_name=metadata.variable_name, units=metadata.units, grid=metadata.grid,
+            variable_attributes=metadata.variable_attributes,
+            calendar=metadata.calendar, with_time_bounds=metadata.time_bounds is not None,
+            member_count=self.cfg.sampling.ensemble_size, expected_timesteps=case_count,
+            global_attributes={
+                "run_name": self.cfg.run_name,
+                "checkpoint_path": str(self.checkpoint_path),
+                "use_ema_weights": self.cfg.checkpoint.use_ema_weights,
+                "weight_source": self.weight_source,
+                "sampler": json.dumps(self.cfg.sampler.to_metadata()),
+                "sampling": json.dumps(asdict(self.cfg.sampling)),
+                "dataset_config": str(self.cfg.paths.dataset_config_path),
+                "generation_run_config": str(self.cfg.config_path),
+                "split": self.cfg.data.split,
+                "stride_time_reference": "source target representative time",
+                "stride_alignment_offset_hours": float(
+                    self.dataset.target_time_offsets.get(metadata.variable_name, 0.0)
+                ),
+            },
+        )
 
     def _resolve_device(self, accelerator: str) -> torch.device:
         if accelerator == "cpu":
@@ -501,19 +625,122 @@ class Generator:
             )
         return path
 
-    def _looks_like_model_state_dict(self, payload: Any) -> bool:
-        if not isinstance(payload, dict) or len(payload) == 0:
-            return False
-        return all(isinstance(key, str) for key in payload.keys()) and any(
-            isinstance(value, torch.Tensor) for value in payload.values()
-        )
+    @staticmethod
+    def _ema_tensor_copies(
+        shadows: Any, targets: dict[str, torch.Tensor], label: str, *, floating_only: bool = False,
+    ) -> list[tuple[torch.Tensor, torch.Tensor]]:
+        if not isinstance(shadows, dict) or not all(isinstance(name, str) for name in shadows):
+            raise ValueError(f"Invalid {label}: expected a dictionary keyed by tensor name")
 
-    def _try_load_state_dict_candidate(self, candidate: Any) -> bool:
-        if not self._looks_like_model_state_dict(candidate):
-            return False
-        self.model.load_state_dict(candidate)
-        return True
+        copies = []
+        for name, shadow in _strip_parallel_prefix(shadows).items():
+            if name not in targets:
+                raise ValueError(f"Invalid {label}: unknown tensor {name!r}")
+            target = targets[name]
+            if not isinstance(shadow, torch.Tensor):
+                raise ValueError(f"Invalid {label}: {name!r} must be a tensor")
+            if floating_only and not shadow.is_floating_point():
+                raise ValueError(f"Invalid {label}: {name!r} has non-floating dtype {shadow.dtype}")
+            if floating_only and (shadow.is_meta or shadow.layout != target.layout):
+                raise ValueError(f"Invalid {label}: {name!r} must have storage and layout {target.layout}")
+            if shadow.shape != target.shape:
+                raise ValueError(
+                    f"Invalid {label}: {name!r} has shape {tuple(shadow.shape)}, "
+                    f"expected {tuple(target.shape)}"
+                )
+            copies.append((target, shadow))
+        return copies
 
+    @staticmethod
+    def _raw_weight_state(checkpoint: dict[str, Any]) -> dict[str, Any] | None:
+        for key in ("model_state_dict", "model"):
+            state = checkpoint.get(key)
+            if (
+                isinstance(state, dict)
+                and all(isinstance(name, str) for name in state)
+                and any(isinstance(value, torch.Tensor) for value in state.values())
+            ):
+                return _strip_parallel_prefix(state)
+        return None
+
+    def _load_flat_ema(self, state: dict[str, Any], label: str) -> None:
+        if not all(isinstance(name, str) for name in state):
+            raise ValueError(f"Invalid {label}: expected string state keys")
+        state = _strip_parallel_prefix(state)
+        expected = self.model.state_dict()
+        missing = expected.keys() - state.keys()
+        unexpected = state.keys() - expected.keys()
+        if missing or unexpected:
+            raise ValueError(
+                f"Invalid {label}: missing keys {sorted(missing)}, "
+                f"unexpected keys {sorted(unexpected)}"
+            )
+        tensors = {name: value for name, value in expected.items() if isinstance(value, torch.Tensor)}
+        self._ema_tensor_copies({name: state[name] for name in tensors}, tensors, label)
+        self.model.load_state_dict(state)
+
+    def _load_ema_shadows(
+        self, ema: dict[str, Any], label: str, raw_state: dict[str, Any] | None,
+    ) -> None:
+        params: dict[str, torch.Tensor] = dict(self.model.named_parameters())
+        buffers = dict(self.model.named_buffers())
+        shadows = ema.get("shadow_params")
+        current_format = label == "ema_state_dict"
+        if current_format:
+            track_buffers = ema.get("track_buffers")
+            if not isinstance(track_buffers, bool):
+                raise ValueError(f"Invalid {label}.track_buffers: expected a boolean")
+            params = {
+                name: param for name, param in params.items()
+                if param.requires_grad and param.is_floating_point()
+            }
+            buffers = {
+                name: buffer for name, buffer in buffers.items()
+                if track_buffers and buffer.is_floating_point()
+            }
+            shadow_buffers = ema.get("shadow_buffers")
+        else:
+            shadow_buffers = ema.get("shadow_buffers", {})
+            if isinstance(shadows, dict) and all(isinstance(name, str) for name in shadows):
+                # A complete legacy state takes precedence even when raw weights are present.
+                state = _strip_parallel_prefix(shadows)
+                if state.keys() == self.model.state_dict().keys():
+                    copies = self._ema_tensor_copies(shadow_buffers, buffers, f"{label}.shadow_buffers")
+                    self._load_flat_ema(shadows, f"{label}.shadow_params")
+                    for target, shadow in copies:
+                        target.copy_(shadow)
+                    return
+            params.update(buffers)
+
+        # Validate both maps before loading the raw state or changing any tensors.
+        copies = []
+        for key, shadow_map, targets, names_key in (
+            ("shadow_params", shadows, params, "tracked_param_names"),
+            ("shadow_buffers", shadow_buffers, buffers, "tracked_buffer_names"),
+        ):
+            copies.extend(self._ema_tensor_copies(
+                shadow_map, targets, f"{label}.{key}", floating_only=current_format,
+            ))
+            if current_format or names_key in ema:
+                names = ema.get(names_key)
+                if not isinstance(names, (list, tuple)) or not all(isinstance(name, str) for name in names):
+                    raise ValueError(f"Invalid {label}.{names_key}: expected a list of tensor names")
+                normalized_names = _strip_parallel_prefix(dict.fromkeys(names))
+                if (
+                    len(names) != len(normalized_names)
+                    or normalized_names.keys() != _strip_parallel_prefix(shadow_map).keys() # type: ignore
+                ):
+                    raise ValueError(f"Invalid {label}.{key}: tensor names do not match {names_key}")
+        if not copies:
+            raise ValueError(f"Invalid {label}: no EMA shadow tensors")
+        if raw_state is None:
+            raise KeyError(f"{label} shadows require 'model_state_dict' or legacy 'model'")
+        self.model.load_state_dict(raw_state)
+        # Copy into live tensors, including non-persistent buffers, like EMA.copy_to.
+        for target, shadow in copies:
+            target.copy_(shadow)
+
+    @torch.no_grad()
     def _load_checkpoint_into_model(self, checkpoint_path: Path) -> dict[str, Any]:
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
         if not isinstance(checkpoint, dict):
@@ -521,35 +748,32 @@ class Generator:
                 f"Expected checkpoint to load into a dict, got {type(checkpoint)}"
             )
 
-        state_dict_loaded = False
-
+        ema_key = "ema_state_dict"
+        ema_state = None
         if self.cfg.checkpoint.use_ema_weights:
-            ema_state_dict = checkpoint.get("ema_state_dict")
-            state_dict_loaded = self._try_load_state_dict_candidate(ema_state_dict)
+            ema_state = checkpoint.get(ema_key)
+            if ema_state is None:
+                ema_key = "ema"
+                ema_state = checkpoint.get(ema_key)
 
-            if not state_dict_loaded:
-                ema_payload = checkpoint.get("ema")
-                if isinstance(ema_payload, dict):
-                    shadow_params = ema_payload.get("shadow_params")
-                    state_dict_loaded = self._try_load_state_dict_candidate(
-                        shadow_params
-                    )
-
-        if not state_dict_loaded:
-            model_state_dict = checkpoint.get("model_state_dict")
-            state_dict_loaded = self._try_load_state_dict_candidate(model_state_dict)
-
-        if not state_dict_loaded:
-            model_payload = checkpoint.get("model")
-            state_dict_loaded = self._try_load_state_dict_candidate(model_payload)
-
-        if not state_dict_loaded:
-            available_keys = sorted(str(key) for key in checkpoint.keys())
-            raise KeyError(
-                "Could not find a loadable model state in checkpoint. Tried keys: "
-                "'ema_state_dict', 'ema.shadow_params', 'model_state_dict', 'model'. "
-                f"Available top-level keys: {available_keys}"
-            )
+        raw_state = self._raw_weight_state(checkpoint)
+        if ema_state is None:
+            if raw_state is None:
+                raise KeyError("Checkpoint has no loadable 'model_state_dict' or legacy 'model'")
+            self.model.load_state_dict(raw_state)
+            self.weight_source = "raw"
+            if self.cfg.checkpoint.use_ema_weights:
+                logger.warning(
+                    "EMA weights requested but absent from %s. Using raw weights.", checkpoint_path,
+                )
+        else:
+            if not isinstance(ema_state, dict) or not ema_state:
+                raise ValueError(f"Invalid {ema_key}: expected a non-empty dictionary")
+            if ema_key == "ema" or "shadow_params" in ema_state or "shadow_buffers" in ema_state:
+                self._load_ema_shadows(ema_state, ema_key, raw_state)
+            else:
+                self._load_flat_ema(ema_state, ema_key)
+            self.weight_source = "ema"
 
         self.model.eval()
         return checkpoint
@@ -565,11 +789,19 @@ class Generator:
         *,
         batch_idx: int,
         remaining_cases: int | None,
+        netcdf_writer: NetCDFWriter | None = None,
+        case_offset: int = 0,
     ) -> int:
         batch_size = self._infer_batch_size(batch)
+        #print('_generate_for_batch: batch_size', batch_size)
+        #print('_generate_for_batch: remaining_cases', remaining_cases)
         if remaining_cases is not None:
             batch_size = min(batch_size, remaining_cases)
         dates = self._get_batch_meta_list(batch, "date", batch_size)
+        #print('_generate_for_batch: dates', dates)
+        #print('_generate_for_batch: batch', batch)
+
+        timestamps = self._get_batch_meta_list(batch, "timestamp", batch_size)
 
         generated_members: list[list[torch.Tensor]] = [[] for _ in range(batch_size)]
 
@@ -578,7 +810,7 @@ class Generator:
             generated = generate_batch(
                 self.model,
                 batch,
-                generation_config=self.cfg.paths.generation_config_path,
+                generation_config=self.cfg.sampler,
                 device=self.device,
             )
             if not isinstance(generated, torch.Tensor):
@@ -595,11 +827,20 @@ class Generator:
                     generated[case_idx : case_idx + 1].detach().cpu()
                 )
 
+        #print('_generate_for_batch: batch_idx=', batch_idx)
+        #print('_generate_for_batch: case_offset=', case_offset)
         for case_idx in range(batch_size):
             case_batch = self._slice_batch(batch, case_idx)
+            if netcdf_writer is not None:
+                self._save_netcdf_case(
+                    netcdf_writer, case_batch, generated_members[case_idx],
+                    dataset_index=case_offset + case_idx,
+                )
+                continue  # NetCDF is an alternative to NPZ, not an additional copy.
             case_output_dir = build_case_output_dir(
                 self.samples_dir,
                 date=dates[case_idx],
+                timestamp=timestamps[case_idx],
                 fallback_name=f"batch_{batch_idx:04d}_case_{case_idx:02d}",
             )
 
@@ -629,8 +870,23 @@ class Generator:
                         f"Unsupported storage_mode {self.cfg.outputs.storage_mode!r}"
                     )
 
+            # Physical aggregates must be computed AFTER converting each member.
+            # Keep separate model-space aggregates for the existing `generated` key.
+            physical_members = None
+            if self.cfg.outputs.save_physical and (
+                self.cfg.outputs.save_ensemble_mean or self.cfg.outputs.save_pmm
+            ):
+                physical_members = [
+                    inverse_transform_target_tensor(case_batch, member)
+                    for member in generated_members[case_idx]
+                ]
+
             if self.cfg.outputs.save_ensemble_mean:
                 ensemble_mean = self._compute_ensemble_mean(generated_members[case_idx])
+                physical_mean = (
+                    self._compute_ensemble_mean(physical_members)
+                    if physical_members is not None else None
+                )
                 save_aggregate(
                     case_batch,
                     ensemble_mean,
@@ -639,10 +895,16 @@ class Generator:
                     checkpoint_path=self.checkpoint_path,
                     save_physical=self.cfg.outputs.save_physical,
                     save_metadata=self.cfg.outputs.save_metadata,
+                    generated_physical=physical_mean,
                 )
 
             if self.cfg.outputs.save_pmm:
-                pmm_field = self._compute_pmm(case_batch, generated_members[case_idx])
+                mask = self._build_pmm_mask(case_batch, generated_members[case_idx][0])
+                pmm_field = self._compute_pmm(generated_members[case_idx], mask=mask)
+                physical_pmm = (
+                    self._compute_pmm(physical_members, mask=mask)
+                    if physical_members is not None else None
+                )
                 save_aggregate(
                     case_batch,
                     pmm_field,
@@ -651,9 +913,37 @@ class Generator:
                     checkpoint_path=self.checkpoint_path,
                     save_physical=self.cfg.outputs.save_physical,
                     save_metadata=self.cfg.outputs.save_metadata,
+                    generated_physical=physical_pmm,
                 )
 
         return batch_size
+
+    def _save_netcdf_case(
+        self, writer: NetCDFWriter, batch: dict[str, Any],
+        members: list[torch.Tensor], *, dataset_index: int,
+    ) -> None:
+        """Convert members first, then aggregate and append one physical record."""
+        reference = self._netcdf_reference_metadata
+        #print('dataset_index =', dataset_index)
+        metadata = reference if dataset_index == 0 else self.dataset.get_output_metadata(dataset_index)
+        timestamp = self._get_batch_meta_list(batch, "timestamp", 1)[0]
+        if timestamp != metadata.aligned_timestamp.isoformat():
+            raise ValueError("NetCDF metadata does not match the generated sample timestamp")
+        for name in ("x", "y", "latitude", "longitude"):
+            if not np.array_equal(getattr(metadata.grid, name), getattr(reference.grid, name)):
+                raise ValueError(f"NorCP {name} coordinates changed within a fixed-grid NetCDF run")
+        if metadata.calendar != reference.calendar or metadata.units != reference.units:
+            raise ValueError("NorCP calendar or physical units changed within the NetCDF run")
+
+        physical_members = [inverse_transform_target_tensor(batch, member) for member in members]
+        mean = self._compute_ensemble_mean(physical_members)
+        mask = self._build_pmm_mask(batch, members[0])
+        pmm = self._compute_pmm(physical_members, mask=mask)
+        writer.append(
+            metadata.timestamp, time_bounds=metadata.time_bounds,
+            members=torch.cat(physical_members, dim=0)[:, 0].numpy(),
+            ensemble_mean=mean[0, 0].numpy(), pmm=pmm[0, 0].numpy(),
+        )
 
 
     def _compute_ensemble_mean(self, generated_members: list[torch.Tensor]) -> torch.Tensor:
@@ -665,9 +955,11 @@ class Generator:
 
     def _compute_pmm(
         self,
-        batch: dict[str, Any],
         generated_members: list[torch.Tensor],
+        *,
+        mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        """Compute PMM in the supplied members' space, using an already-built mask."""
         if len(generated_members) == 0:
             raise ValueError("generated_members must contain at least one tensor")
 
@@ -679,7 +971,6 @@ class Generator:
             )
 
         ensemble_univariate = ensemble[:, 0]  # [M, H, W]
-        mask = self._build_pmm_mask(batch, generated_members[0])
         return pmm_from_ensemble(
             ensemble_univariate,
             mask=mask,
@@ -744,9 +1035,12 @@ class Generator:
             checkpoint_mode=self.cfg.checkpoint.mode,
             checkpoint_path=self.checkpoint_path,
             use_ema_weights=self.cfg.checkpoint.use_ema_weights,
+            weight_source=self.weight_source,
             split=self.cfg.data.split,
             batch_size=self.cfg.data.batch_size,
             ensemble_size=self.cfg.sampling.ensemble_size,
+            sampler=self.cfg.sampler.to_metadata(),
+            sampling=asdict(self.cfg.sampling),
             max_cases=self.cfg.limits.max_cases,
             device=str(self.device),
             save_physical=self.cfg.outputs.save_physical,
@@ -760,9 +1054,11 @@ class Generator:
 
     def _infer_batch_size(self, batch: dict[str, Any]) -> int:
         target = batch.get("target")
+        #print('_infer_batch_size:int(target.shape[0]),', int(target.shape[0]))
         if isinstance(target, torch.Tensor):
             return int(target.shape[0])
         cond_dynamic = batch.get("cond_dynamic")
+        #print('_infer_batch_size:int(cond_dynamic.shape[0]),', int(cond_dynamic.shape[0]))
         if isinstance(cond_dynamic, torch.Tensor):
             return int(cond_dynamic.shape[0])
         raise ValueError("Could not infer batch size from batch tensors")
@@ -777,11 +1073,9 @@ class Generator:
         if not isinstance(meta, dict):
             return [None] * batch_size
         value = meta.get(key)
-        if isinstance(value, list):
-            if len(value) == batch_size:
-                return value
-            if len(value) == 1 and batch_size == 1:
-                return value
+        if isinstance(value, list) and len(value) >= batch_size:
+            # max_cases can select only a prefix of the collated batch.
+            return value[:batch_size]
         return [None] * batch_size
 
     def _set_member_seed(self, *, batch_idx: int, member_idx: int) -> None:
@@ -810,7 +1104,11 @@ class Generator:
         logger.info(f"Run name:          {self.cfg.run_name}")
         logger.info(f"Device:            {self.device}")
         logger.info(f"Output dir:        {self.output_dir}")
-        logger.info(f"Samples dir:       {self.samples_dir}")
+        if self.cfg.outputs.output_format == "netcdf":
+            logger.info(f"NetCDF dir:        {self.output_dir / 'netcdf'}")
+        else:
+            logger.info(f"Samples dir:       {self.samples_dir}")
+        logger.info(f"Output format:     {self.cfg.outputs.output_format}")
         logger.info(f"Dataset config:    {self.cfg.paths.dataset_config_path}")
         logger.info(f"Model config:      {self.cfg.paths.model_config_path}")
         logger.info(f"Generation config: {self.cfg.paths.generation_config_path}")
@@ -827,10 +1125,12 @@ class Generator:
         logger.info(
             f"Num batches:       {'unknown' if loader_len is None else loader_len}"
         )
-        logger.info(f"Ensemble size:     {self.cfg.sampling.ensemble_size}")
+        logger.info("EDM sampler:       %s", self.cfg.sampler.to_metadata())
+        logger.info("Ensemble sampling: %s", asdict(self.cfg.sampling))
         logger.info(f"Max cases:         {self.cfg.limits.max_cases}")
         logger.info(f"Save members:      {self.cfg.outputs.save_members}")
         logger.info(f"Save ens. mean:    {self.cfg.outputs.save_ensemble_mean}")
         logger.info(f"Save PMM:          {self.cfg.outputs.save_pmm}")
         logger.info(f"Storage mode:      {self.cfg.outputs.storage_mode}")
-        logger.info(f"Use EMA weights:   {self.cfg.checkpoint.use_ema_weights}")
+        logger.info(f"Requested EMA:     {self.cfg.checkpoint.use_ema_weights}")
+        logger.info(f"Weight source:     {self.weight_source}")

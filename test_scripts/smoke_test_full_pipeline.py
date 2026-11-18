@@ -293,7 +293,7 @@ def main() -> None:
     print("Pipeline run completed.")
 
     print_header("Checking expected outputs")
-    logs_dir = ROOT / "runs" / "pipeline_logs" / cfg.meta.name
+    logs_dir = runner.logs_dir
     summary_path = logs_dir / "experiment_summary.json"
 
     require_file(summary_path)

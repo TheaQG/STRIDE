@@ -16,6 +16,11 @@ Main entrypoint:
 training_main.py
 ```
 
+Single-node distributed training is documented separately in
+[`distributed_training.md`](distributed_training.md). That guide covers the
+supported DDP scope, LUMI launch commands, RCCL configuration, batch-size
+semantics, performance observations, and monitoring.
+
 ---
 
 # Training overview
@@ -65,6 +70,9 @@ Outputs:
 train_loader
 val_loader
 ```
+
+Under DDP, each loader uses a `DistributedSampler` so every rank processes a
+different partition. The sampler is not used for CPU or one-process training.
 
 ---
 

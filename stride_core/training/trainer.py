@@ -34,6 +34,8 @@ from pathlib import Path
 from typing import Any
 
 import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel
 import yaml
 
 from stride_core.configs.model_config import ModelSpec
@@ -54,6 +56,13 @@ from stride_core.training.optim import (
     SchedulerConfig,
     build_optimizer,
     build_scheduler,
+)
+from stride_core.utils.distributed import (
+    barrier,
+    is_distributed,
+    is_main_process,
+    local_rank,
+    unwrap_model,
 )
 
 from stride_core.training.training_logging import (
@@ -102,6 +111,8 @@ class TrainingRunConfig:
     generation_config_path: Path | None
 
     accelerator: str
+    sync_batchnorm: bool
+    find_unused_parameters: bool
 
     max_epochs: int
     max_train_batches: int | None
@@ -142,6 +153,7 @@ class TrainingRunConfig:
         run_cfg = training_cfg.get("run", {})
         configs_cfg = training_cfg.get("configs", {})
         device_cfg = training_cfg.get("device", {})
+        distributed_cfg = training_cfg.get("distributed", {})
         loop_cfg = training_cfg.get("loop", {})
         logging_cfg = training_cfg.get("logging", {})
 
@@ -151,6 +163,8 @@ class TrainingRunConfig:
             raise ValueError("Expected 'training.configs' to be a dict")
         if not isinstance(device_cfg, dict):
             raise ValueError("Expected 'training.device' to be a dict")
+        if not isinstance(distributed_cfg, dict):
+            raise ValueError("Expected 'training.distributed' to be a dict")
         if not isinstance(loop_cfg, dict):
             raise ValueError("Expected 'training.loop' to be a dict")
         if not isinstance(logging_cfg, dict):
@@ -187,6 +201,11 @@ class TrainingRunConfig:
                 f"training.device.accelerator must be 'auto', 'cpu', or 'cuda', got {accelerator}"
             )
 
+        sync_batchnorm = bool(distributed_cfg.get("sync_batchnorm", False))
+        find_unused_parameters = bool(
+            distributed_cfg.get("find_unused_parameters", False)
+        )
+
         max_epochs = int(loop_cfg.get("max_epochs", 1))
         validate_every_n_epochs = int(loop_cfg.get("validate_every_n_epochs", 1))
         max_train_batches = _maybe_int(loop_cfg.get("max_train_batches", None))
@@ -215,6 +234,8 @@ class TrainingRunConfig:
             dataset_config_path=dataset_config_path,
             generation_config_path=generation_config_path,
             accelerator=accelerator,
+            sync_batchnorm=sync_batchnorm,
+            find_unused_parameters=find_unused_parameters,
             max_epochs=max_epochs,
             max_train_batches=max_train_batches,
             max_val_batches=max_val_batches,
@@ -239,6 +260,7 @@ class Trainer:
 
     def __init__(self, training_config_path: str | Path) -> None:
         self.cfg = TrainingRunConfig.from_yaml(training_config_path)
+        self.is_main_process = is_main_process()
 
         self.device = self._resolve_device(self.cfg.accelerator)
         # Disable AMP for now. On the current LUMI setup this has shown unstable
@@ -248,14 +270,24 @@ class Trainer:
         if self.device.type == "cuda":
             torch.backends.cudnn.benchmark = True
             torch.backends.cudnn.deterministic = False
-        self.checkpoint_dir = ensure_checkpoint_dir(self.cfg.output_dir / "checkpoints")
+        self.checkpoint_dir = self.cfg.output_dir / "checkpoints"
+        if self.is_main_process:
+            ensure_checkpoint_dir(self.checkpoint_dir)
+        barrier()
 
         self._set_seed(self.cfg.seed)
 
+        print('Trainer: self.cfg.training_config_path:', self.cfg.training_config_path)
         self.data: BuiltTrainingData = build_training_data(self.cfg.training_config_path)
 
         self.model_spec = ModelSpec.from_yaml(self.cfg.model_config_path)
-        self.model = build_model(self.model_spec).to(self.device)
+        model = build_model(self.model_spec).to(self.device)
+        self.model = _wrap_model_for_distributed(
+            model,
+            device=self.device,
+            sync_batchnorm=self.cfg.sync_batchnorm,
+            find_unused_parameters=self.cfg.find_unused_parameters,
+        )
         self.loss_fn = EDMLoss(
             rain_gate_cfg={
                 "enabled": self.model_spec.rain_gate_loss.enabled,
@@ -294,7 +326,7 @@ class Trainer:
 
         self.ema: EMA | None = None
         if self.ema_config.enabled:
-            self.ema = EMA.from_config(self.model, self.ema_config)
+            self.ema = EMA.from_config(unwrap_model(self.model), self.ema_config)
 
         self.current_epoch = 0
         self.global_step = 0
@@ -316,21 +348,23 @@ class Trainer:
         """
         Run the full training loop.
         """
-        self._print_run_summary()
+        if self.is_main_process:
+            self._print_run_summary()
 
         start_epoch = self.current_epoch
         for epoch in range(start_epoch, self.cfg.max_epochs):
             self.current_epoch = epoch
 
             train_metrics = self.train_epoch(epoch)
-            self._print_epoch_summary("train", epoch, train_metrics)
-            self.history.add_train_epoch(
-                epoch + 1,
-                {
-                    **train_metrics,
-                    "lr": self._get_current_lr(),
-                },
-            )
+            if self.is_main_process:
+                self._print_epoch_summary("train", epoch, train_metrics)
+                self.history.add_train_epoch(
+                    epoch + 1,
+                    {
+                        **train_metrics,
+                        "lr": self._get_current_lr(),
+                    },
+                )
 
             val_metrics: dict[str, float] | None = None
             improved_val = False
@@ -338,20 +372,21 @@ class Trainer:
             if do_validate:
                 val_metrics = self.validate_epoch(epoch)
                 improved_val = self._update_best_val_loss(val_metrics["loss"])
-                self._print_epoch_summary(
-                    "valid",
-                    epoch,
-                    val_metrics,
-                    improved=improved_val,
-                )
-                self.history.add_valid_epoch(
-                    epoch + 1,
-                    {
-                        **val_metrics,
-                        "improved": improved_val,
-                        "best_val_loss": self.best_val_loss,
-                    },
-                )
+                if self.is_main_process:
+                    self._print_epoch_summary(
+                        "valid",
+                        epoch,
+                        val_metrics,
+                        improved=improved_val,
+                    )
+                    self.history.add_valid_epoch(
+                        epoch + 1,
+                        {
+                            **val_metrics,
+                            "improved": improved_val,
+                            "best_val_loss": self.best_val_loss,
+                        },
+                    )
                 self._step_scheduler_after_validation(val_metrics["loss"])
             else:
                 self._step_scheduler_without_metric()
@@ -364,7 +399,7 @@ class Trainer:
             )
 
             preview_result: dict[str, Any] | None = None
-            if should_run_training_preview(
+            if self.is_main_process and should_run_training_preview(
                 epoch=epoch,
                 improved_val=improved_val,
                 preview_config=self.preview_config,
@@ -382,17 +417,28 @@ class Trainer:
                 preview_metrics = self._compute_preview_metrics(preview_result)
                 self._attach_preview_metrics_to_last_valid_history(preview_metrics)
 
-            if self.cfg.save_history_json:
+            if self.is_main_process and self.cfg.save_history_json:
                 self.history.save_json(self.history_path)
 
-            if self.monitoring_config.enabled and self.monitoring_config.save_history_plots:
+            if (
+                self.is_main_process
+                and self.monitoring_config.enabled
+                and self.monitoring_config.save_history_plots
+            ):
                 self._save_monitoring_history_plots()
+
+            barrier()
 
 
     def train_epoch(self, epoch: int) -> dict[str, float]:
+        if self.data.train_sampler is not None:
+            self.data.train_sampler.set_epoch(epoch)
+
         self.model.train()
 
         total_loss = 0.0
+        ##total_loss_tensor = 0.0
+        #total_loss = torch.zeros(1, device=self.device)
         num_batches = 0
 
         for batch_idx, batch in enumerate(self.data.train_loader):
@@ -404,7 +450,11 @@ class Trainer:
 
             batch = self._move_batch_to_device(batch, self.device)
 
-            if self.cfg.log_batch_shapes_once and not self._did_log_batch_shapes:
+            if (
+                self.is_main_process
+                and self.cfg.log_batch_shapes_once
+                and not self._did_log_batch_shapes
+            ):
                 self._print_batch_overview(batch)
                 self._did_log_batch_shapes = True
 
@@ -434,15 +484,23 @@ class Trainer:
             self.scaler.update()
 
             if self.ema is not None:
-                self.ema.update(self.model)
+                self.ema.update(unwrap_model(self.model))
 
             loss_value = float(loss.item())
+            ##total_loss += loss.detach()  # GPU accumulation, no sync
             total_loss += loss_value
             num_batches += 1
             self.global_step += 1
+            #with torch.no_grad():
+            #    total_loss_tensor += loss.detach()
+
+            # At end of epoch:
+            #avg_loss = float(total_loss_tensor.item()) / num_batches
+
 
             should_print_step = (
-                self.cfg.print_step_progress
+                self.is_main_process
+                and self.cfg.print_step_progress
                 and self.cfg.print_every_n_steps is not None
                 and self.cfg.print_every_n_steps > 0
                 and self.global_step % self.cfg.print_every_n_steps == 0
@@ -460,16 +518,29 @@ class Trainer:
         if num_batches == 0:
             raise RuntimeError("No training batches were processed")
 
+        total_loss, num_batches = _reduce_loss_totals(
+            total_loss,
+            num_batches,
+            device=self.device,
+        )
+
         return {
             "loss": total_loss / num_batches,
+            #"loss": avg_loss,
+            #"loss": (total_loss / num_batches).item(),  # single GPU→CPU sync per epoch
             "num_batches": float(num_batches),
         }
 
     @torch.no_grad()
     def validate_epoch(self, epoch: int) -> dict[str, float]:
+        if self.data.val_sampler is not None:
+            self.data.val_sampler.set_epoch(epoch)
+
         eval_model = self.model
         if self.ema is not None:
-            eval_model = self.ema.clone_model(self.model).to(self.device)
+            eval_model = self.ema.clone_model(unwrap_model(self.model)).to(
+                self.device
+            )
         eval_model.eval()
 
         total_loss = 0.0
@@ -505,7 +576,8 @@ class Trainer:
             num_batches += 1
 
             should_print_step = (
-                self.cfg.print_step_progress
+                self.is_main_process
+                and self.cfg.print_step_progress
                 and self.cfg.print_every_n_steps is not None
                 and self.cfg.print_every_n_steps > 0
             )
@@ -522,6 +594,12 @@ class Trainer:
         if num_batches == 0:
             raise RuntimeError("No validation batches were processed")
 
+        total_loss, num_batches = _reduce_loss_totals(
+            total_loss,
+            num_batches,
+            device=self.device,
+        )
+
         return {
             "loss": total_loss / num_batches,
             "num_batches": float(num_batches),
@@ -532,6 +610,7 @@ class Trainer:
     # ------------------------------------------------------------------
 
     def _resume_if_requested(self) -> None:
+        barrier()
         resume_path = resolve_resume_checkpoint(
             self.checkpoint_config.resume_from,
             checkpoint_dir=self.checkpoint_dir,
@@ -551,15 +630,17 @@ class Trainer:
         self.current_epoch = loaded.epoch
         self.global_step = loaded.global_step
         self.best_val_loss = loaded.best_val_loss
+        barrier()
 
-        log_run_setup(
-            [
-                f"Resumed checkpoint: {loaded.checkpoint_path}",
-                f"Resumed epoch:      {loaded.epoch}",
-                f"Resumed global_step:{loaded.global_step}",
-                f"Resumed best_val:   {loaded.best_val_loss}",
-            ]
-        )
+        if self.is_main_process:
+            log_run_setup(
+                [
+                    f"Resumed checkpoint: {loaded.checkpoint_path}",
+                    f"Resumed epoch:      {loaded.epoch}",
+                    f"Resumed global_step:{loaded.global_step}",
+                    f"Resumed best_val:   {loaded.best_val_loss}",
+                ]
+            )
 
     def _checkpoint_if_needed(
         self,
@@ -569,7 +650,7 @@ class Trainer:
         *,
         improved_val: bool,
     ) -> None:
-        if not self.checkpoint_config.enabled:
+        if not self.is_main_process or not self.checkpoint_config.enabled:
             return
 
         checkpoint_kwargs = {
@@ -771,8 +852,8 @@ class Trainer:
 
     def _get_preview_model(self) -> torch.nn.Module:
         if self.preview_config.use_ema_model and self.ema is not None:
-            return self.ema.clone_model(self.model).to(self.device)
-        return self.model
+            return self.ema.clone_model(unwrap_model(self.model)).to(self.device)
+        return unwrap_model(self.model)
 
     def _run_generation_preview(self, epoch: int) -> dict[str, Any] | None:
         if self.cfg.generation_config_path is None:
@@ -860,9 +941,19 @@ class Trainer:
         if accelerator == "cuda":
             if not torch.cuda.is_available():
                 raise RuntimeError("CUDA was requested but is not available")
-            return torch.device("cuda")
+            return (
+                torch.device("cuda", local_rank())
+                if is_distributed()
+                else torch.device("cuda")
+            )
         if accelerator == "auto":
-            return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            if torch.cuda.is_available():
+                return (
+                    torch.device("cuda", local_rank())
+                    if is_distributed()
+                    else torch.device("cuda")
+                )
+            return torch.device("cpu")
         raise ValueError(f"Unsupported accelerator value: {accelerator}")
 
     @staticmethod
@@ -917,3 +1008,54 @@ def _maybe_int(value: Any) -> int | None:
     if value is None:
         return None
     return int(value)
+
+
+def _wrap_model_for_distributed(
+    model: torch.nn.Module,
+    *,
+    device: torch.device,
+    sync_batchnorm: bool,
+    find_unused_parameters: bool,
+) -> torch.nn.Module:
+    if not is_distributed():
+        return model
+    if not dist.is_available() or not dist.is_initialized():
+        raise RuntimeError(
+            "Distributed runtime was detected before the process group was initialized"
+        )
+
+    if sync_batchnorm:
+        if device.type != "cuda":
+            raise RuntimeError("SyncBatchNorm requires CUDA/ROCm DDP training")
+        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
+
+    ddp_kwargs: dict[str, Any] = {
+        "find_unused_parameters": find_unused_parameters,
+    }
+    if device.type == "cuda":
+        ddp_kwargs["device_ids"] = [device.index]
+        ddp_kwargs["output_device"] = device.index
+
+    return DistributedDataParallel(model, **ddp_kwargs)
+
+
+def _reduce_loss_totals(
+    total_loss: float,
+    num_batches: int,
+    *,
+    device: torch.device,
+) -> tuple[float, int]:
+    if not is_distributed():
+        return total_loss, num_batches
+    if not dist.is_available() or not dist.is_initialized():
+        raise RuntimeError(
+            "Distributed runtime was detected before the process group was initialized"
+        )
+
+    totals = torch.tensor(
+        [total_loss, float(num_batches)],
+        dtype=torch.float64,
+        device=device,
+    )
+    dist.all_reduce(totals, op=dist.ReduceOp.SUM)
+    return float(totals[0].item()), int(totals[1].item())

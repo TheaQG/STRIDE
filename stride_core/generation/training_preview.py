@@ -15,6 +15,7 @@ This version is preview-oriented and climate-aware:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 from typing import Any, cast
 
@@ -23,6 +24,7 @@ import numpy as np
 import torch
 import yaml
 
+from stride_core.configs.generation_config import GenerationConfig
 from stride_core.generation.generation_utils import (
     build_preview_payload,
     generate_batch,
@@ -149,6 +151,7 @@ def run_training_preview(
     device: torch.device,
     preview_config: TrainingPreviewConfig,
 ) -> dict[str, Any]:
+    sampler = GenerationConfig.from_yaml(generation_config_path)
     output_dir = Path(output_dir) / preview_config.output_subdir
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -160,7 +163,7 @@ def run_training_preview(
     generated = generate_batch(
         model,
         batch,
-        generation_config=generation_config_path,
+        generation_config=sampler,
         device=device,
     )
 
@@ -185,7 +188,15 @@ def run_training_preview(
             preview_payload=preview_payload,
         )
 
+    metadata_path = output_dir / f"training_preview_epoch_{epoch + 1:04d}.json"
+    metadata_path.write_text(json.dumps({
+        "epoch": epoch + 1,
+        "generation_config": str(generation_config_path),
+        "sampler": sampler.to_metadata(),
+    }, indent=2) + "\n", encoding="utf-8")
+
     return {
+        "metadata_path": str(metadata_path),
         "batch": batch,
         "generated": generated,
         "preview_payload": preview_payload,
